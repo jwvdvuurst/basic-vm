@@ -1,0 +1,13 @@
+[package]
+name = "basic-vm"
+version = "0.3.0"
+edition = "2024"
+description = "An extensible BASIC compiler and standalone bytecode virtual machine"
+
+[features]
+default = ["window"]
+# Desktop window backend for SCREEN (pulls in the minifb crate).
+window = ["dep:minifb"]
+
+[dependencies]
+minifb = { version = "0.29", optional = true }

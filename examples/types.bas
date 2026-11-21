@@ -1,0 +1,45 @@
+OPTION EXPLICIT
+REM Exact 64-bit integers, typed declarations, TYPEOF, 2-D arrays, map iteration.
+DIM BIG AS INTEGER = 9223372036854775807&
+PRINT "max: "; BIG
+PRINT "2^53+1 > 2^53: "; 9007199254740993& > 9007199254740992&
+PRINT "7 \ 2 = "; 7& \ 2&; "  -7 MOD 3 = "; -7& MOD 3&
+PRINT "hex: "; &HFF
+
+DIM TOTAL AS INTEGER
+FOR I = 1& TO 5&
+    TOTAL = TOTAL + I * I
+NEXT
+PRINT "sum of squares: "; TOTAL
+
+TRY
+    BIG = BIG + 1&
+CATCH E$
+    PRINT "caught: "; E$
+END TRY
+
+DIM MIXED AS LIST = LIST(1, 2&, "three", LIST(4), MAP("k", 5))
+DIM ITEM AS VARIANT
+FOR EACH ITEM IN MIXED
+    PRINT TYPEOF(ITEM)
+NEXT
+
+DIM GRID(2, 3) AS INTEGER
+FOR R = 1 TO 2
+    FOR C = 1 TO 3
+        GRID[R, C] = R * 10& + C
+    NEXT
+NEXT
+PRINT "GRID[2,3] = "; GRID[2, 3]; " rows="; UBOUND(GRID, 1); " cols="; UBOUND(GRID, 2)
+
+DIM AGES AS MAP = MAP("ada", 36, "alan", 41)
+FOR EACH NAME$, AGE IN AGES
+    PRINT NAME$; " is "; AGE
+NEXT
+
+PRINT "double: "; DOUBLE_IT(21&)
+END
+
+FUNCTION DOUBLE_IT(PARAMETER X AS INTEGER) AS INTEGER
+    DOUBLE_IT = X * 2&
+FEND
