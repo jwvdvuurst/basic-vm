@@ -6,6 +6,7 @@ mod graphics;
 mod heap;
 mod lexer;
 mod stdlib;
+mod testing;
 mod value;
 mod vm;
 #[cfg(feature = "window")]
@@ -13,15 +14,19 @@ mod window;
 
 pub use bytecode::{
     BinaryOp, Builtin, CallBinding, CollectionKind, EventKind, FieldDefault, Instruction, Op,
-    Place, Program, RecordField, RecordType, RefArg, VarType,
+    Place, Program, RecordField, RecordType, RefArg, TestCase, VarType,
 };
 pub use compiler::{compile, compile_file, compile_from};
 pub use console::{ConsoleKeys, KeyProvider, NoKeys, ScriptedKeys, enable_terminal_sequences};
 pub use graphics::{
-    AutoClose, Canvas, Event, GraphicsBackend, HeadlessBackend, MAX_DIMENSION, MAX_RADIUS, PALETTE,
+    AutoClose, Canvas, Event, GraphicsBackend, HeadlessBackend, ImageFormat, MAX_DIMENSION,
+    MAX_RADIUS, PALETTE,
 };
 pub use heap::{HeapStats, INITIAL_HEAP_BYTES};
-pub use vm::Vm;
+pub use testing::{
+    MAX_CAPTURED_OUTPUT, TestOptions, TestReport, TestResult, TestStatus, run_tests, run_tests_with,
+};
+pub use vm::{MAX_CALL_DEPTH, Vm};
 #[cfg(feature = "window")]
 pub use window::WindowBackend;
 
@@ -38,6 +43,9 @@ pub struct Error {
     /// The imported source file the error belongs to; `None` for the main
     /// program.
     pub file: Option<String>,
+    /// The error is a failed `ASSERT`, `ASSERTEQ` or `ASSERTNEAR` (as opposed
+    /// to any other runtime error). Always false for compile errors.
+    pub assertion: bool,
 }
 
 impl Error {
@@ -47,6 +55,7 @@ impl Error {
             message: message.into(),
             function: None,
             file: None,
+            assertion: false,
         }
     }
 }

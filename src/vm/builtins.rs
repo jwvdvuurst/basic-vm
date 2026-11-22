@@ -109,15 +109,15 @@ impl Vm {
         Ok(values)
     }
 
-    fn new_list(&mut self, items: &[Value]) -> Result<Value> {
-        let roots = self.roots();
+    pub(super) fn new_list(&mut self, items: &[Value]) -> Result<Value> {
+        let roots = self.roots_for_values(items.len());
         self.heap
             .new_collection(CollectionKind::List, items, &roots)
             .map(Value::Collection)
     }
 
     fn store_items(&mut self, reference: ObjectRef, items: &[Value]) -> Result<()> {
-        let roots = self.roots();
+        let roots = self.roots_for_values(items.len());
         self.heap.replace_collection(reference, items, &roots)
     }
 
@@ -421,7 +421,9 @@ impl Vm {
                 let position = self.position(CollectionKind::Map, &pairs, args[1])?;
                 boolean(position.is_some())
             }
-            Builtin::Timer => Value::Number(self.started.elapsed().as_secs_f64()),
+            Builtin::Timer => {
+                Value::Number((self.started.elapsed() + self.test.skipped).as_secs_f64())
+            }
             Builtin::UnixTime => Value::Number(now_seconds()? as f64),
             Builtin::Now | Builtin::Date | Builtin::Time => {
                 let (date, time) = stdlib::format_utc(now_seconds()? as i64);
@@ -666,12 +668,12 @@ impl Vm {
                 Value::Record(reference) => {
                     let ty = self.heap.record_type(reference)?;
                     let fields = self.heap.record_fields(reference)?;
-                    let roots = self.roots();
+                    let roots = self.roots_for_values(fields.len());
                     Value::Record(self.heap.new_record(ty, &fields, &roots)?)
                 }
                 Value::Collection(reference) => {
                     let (kind, items) = self.heap.collection(reference)?;
-                    let roots = self.roots();
+                    let roots = self.roots_for_values(items.len());
                     Value::Collection(self.heap.new_collection(kind, &items, &roots)?)
                 }
                 other => other,

@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use basic_vm::{Error, Vm, compile};
+use basic_vm::{Error, MAX_CALL_DEPTH, Vm, compile};
 
 fn run(source: &str) -> (String, Result<(), Error>, Vm) {
     let mut vm = Vm::new(compile(source).unwrap()).unwrap();
@@ -292,4 +292,77 @@ fn variables_named_like_try_statements_still_work() {
         ),
         "11\n"
     );
+}
+
+fn depth_error(source: &str) -> Error {
+    let (_, result, _vm) = run(source);
+    result.expect_err("expected the call depth limit")
+}
+
+#[test]
+fn runaway_recursion_is_a_catchable_error_naming_the_function() {
+    let source = "FUNCTION Boom(PARAMETER n)\nBoom = Boom(n + 1) + 1\nFEND\n\
+                  TRY\nPRINT Boom(0)\nCATCH e$\nPRINT e$\nEND TRY\nPRINT \"after\"";
+    assert_eq!(
+        run_ok(source),
+        format!(
+            "call depth limit exceeded ({MAX_CALL_DEPTH} frames) calling BOOM; \
+             is a function calling itself without end?\nafter\n"
+        )
+    );
+}
+
+#[test]
+fn the_call_depth_limit_applies_to_methods_constructors_and_mutual_recursion() {
+    let error = depth_error(
+        "CLASS M\n FUNCTION Spin(PARAMETER n)\n  CALL SELF.Spin(n + 1)\n FEND\nEND CLASS\n\
+         DIM m AS M\nCALL m.Spin(0)\n",
+    );
+    assert!(
+        error.message.starts_with("call depth limit exceeded") && error.message.contains("SPIN"),
+        "{error}"
+    );
+    assert_eq!(error.function.as_deref(), Some("M.SPIN"));
+
+    let error = depth_error(
+        "CLASS Node\nnxt AS Node\n FUNCTION NEW()\n  SELF.nxt = NEW Node()\n FEND\nEND CLASS\n\
+         DIM n AS Node = NEW Node()\n",
+    );
+    assert!(
+        error.message.starts_with("call depth limit exceeded"),
+        "{error}"
+    );
+
+    let error = depth_error(
+        "FUNCTION Ping(PARAMETER n)\n CALL Pong(n)\nFEND\nFUNCTION Pong(PARAMETER n)\n CALL Ping(n)\nFEND\nCALL Ping(1)\n",
+    );
+    assert!(
+        error.message.starts_with("call depth limit exceeded"),
+        "{error}"
+    );
+}
+
+#[test]
+fn recursion_up_to_the_limit_still_works_and_the_vm_recovers_afterwards() {
+    let down = format!(
+        "FUNCTION Down(PARAMETER n)\nIF n = 0 THEN\nDown = 0\nELSE\nDown = Down(n - 1) + 1\nEND IF\nFEND\n\
+         PRINT Down({})\nTRY\nPRINT Down({})\nCATCH e$\nPRINT \"limit\"\nEND TRY\nPRINT Down(100)",
+        MAX_CALL_DEPTH - 1,
+        MAX_CALL_DEPTH
+    );
+    assert_eq!(
+        run_ok(&down),
+        format!("{}\nlimit\n100\n", MAX_CALL_DEPTH - 1)
+    );
+}
+
+#[test]
+fn deep_recursion_that_allocates_keeps_its_data_across_collections() {
+    // Every frame holds a list and a string; collections run while 3000
+    // frames are suspended, so all of them must stay reachable.
+    let source = "FUNCTION Build(PARAMETER n)\nLOCAL l\nLOCAL s$\nl = LIST(n, n + 1)\ns$ = \"v\" + STR$(n)\n\
+                  IF n > 0 THEN\nBuild = Build(n - 1)\nELSE\nBuild = 0\nEND IF\n\
+                  Build = Build + LEN(s$) + l[2] - n\nFEND\nPRINT Build(3000)";
+    let expected: usize = (0..=3000usize).map(|n| format!("v{n}").len() + 1).sum();
+    assert_eq!(run_ok(source), format!("{expected}\n"));
 }

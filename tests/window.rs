@@ -37,9 +37,29 @@ fn rejects_a_bad_auto_close_value() {
 /// display or in a build without the `window` feature.
 #[test]
 fn real_window_opens_and_closes_itself() {
+    if let Some(stdout) = run_in_window(&paint(), "500") {
+        assert_eq!(stdout, "Goodbye\n");
+    }
+}
+
+/// The double-buffered animation example in a real window; the auto-close
+/// request ends the loop early, so only the end message is asserted.
+#[test]
+fn real_window_runs_the_double_buffered_animation() {
+    let animation = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("animation.bas");
+    if let Some(stdout) = run_in_window(&animation, "400") {
+        assert_eq!(stdout, "Animation done\n");
+    }
+}
+
+/// Runs `program` with a real window and `--auto-close-ms`, killing it after
+/// 30 s. Returns its stdout, or `None` when no window is available.
+fn run_in_window(program: &Path, auto_close_ms: &str) -> Option<String> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_basic-vm"))
-        .args(["--auto-close-ms", "500"])
-        .arg(paint())
+        .args(["--auto-close-ms", auto_close_ms])
+        .arg(program)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -64,9 +84,9 @@ fn real_window_opens_and_closes_itself() {
             || stderr.contains("no window backend")
         {
             eprintln!("skipped: no window available: {stderr}");
-            return;
+            return None;
         }
         panic!("window run failed: {status}: {stderr}");
     }
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "Goodbye\n");
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }

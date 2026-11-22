@@ -30,7 +30,7 @@ modules, console control, graphics and events.
 | Block `IF` | `IF C THEN` / `ELSEIF C THEN` / `ELSE` / `END IF` | Multi-line conditional; nestable. See [Control flow](#structured-control-flow). |
 | `SELECT CASE` | `SELECT CASE X` / `CASE ...` / `END SELECT` | Multi-way branch on numbers or strings. |
 | `DO` / `LOOP` | `DO WHILE C` ... `LOOP` | Loop with a leading or trailing `WHILE`/`UNTIL` test. |
-| `EXIT` | `EXIT FOR`, `EXIT WHILE`, `EXIT DO`, `EXIT FUNCTION` | Leave the innermost matching loop, or the function. |
+| `EXIT` | `EXIT FOR`, `EXIT WHILE`, `EXIT DO`, `EXIT FUNCTION`, `EXIT TEST` | Leave the innermost matching loop, the function, or the current `TEST` (as a pass). |
 | `CONTINUE` | `CONTINUE FOR`, `CONTINUE WHILE`, `CONTINUE DO` | Start the next pass of the innermost matching loop. |
 | `CONST` | `CONST LIMIT = 10` | Declare a constant (see below). |
 | Numeric `FOR` | `FOR I = 1 TO 10 STEP 2` | Start an inclusive numeric loop; `STEP` defaults to `1`. |
@@ -49,6 +49,10 @@ modules, console control, graphics and events.
 | `CALL` | `CALL HELLO` or `CALL UPDATE(A)` | Call a function for its side effects, discarding any result. |
 | `CLASS` | `CLASS Name` ... `END CLASS` | Declare an object type: fields plus methods (`FUNCTION ... FEND`). See [Objects](#objects-class). |
 | `CALL` (method) | `CALL obj.Method(args)` | Invoke a method, discarding any result. |
+| `TEST` | `TEST Add_basic` ... `END TEST` | Declare a unit test (skipped in normal runs; run with `--test`). See [Unit testing](#unit-testing). |
+| `ASSERT` | `ASSERT X > 0 [, "message"]` | Raise a catchable assertion failure unless the condition is nonzero. |
+| `ASSERTEQ` | `ASSERTEQ expected, actual [, "message"]` | Fail unless the two values are equal (deep comparison). |
+| `ASSERTNEAR` | `ASSERTNEAR expected, actual, epsilon [, "message"]` | Fail unless two numbers differ by at most `epsilon`. |
 | `END` | `END` | Terminate the program. |
 | `STOP` | `STOP` | Same as `END`; there is no resume operation. |
 | `GC` | `GC` | Collect unreachable strings and collections, including cycles, and compact the heap. |
@@ -248,6 +252,14 @@ without assigning one. Expression calls always require parentheses.
 - Recursion and calls before the function declaration are supported.
   Each call has independent locals, parameters, result and loop state.
   A function cannot read another call's locals.
+- **Call depth limit**: at most **25,000** calls may be active at once
+  (`basic_vm::MAX_CALL_DEPTH`). Functions, methods, constructors (`NEW`) and
+  event handlers all count. Exceeding it raises an ordinary runtime error that
+  `TRY`/`CATCH` can catch: `call depth limit exceeded (25000 frames) calling NAME;
+  is a function calling itself without end?` (`NAME` is the upper-case,
+  module-qualified function). A runaway recursion therefore fails in about
+  0.1-0.3 s using roughly 6-35 MB instead of exhausting memory; legitimate
+  recursion up to 25,000 nested calls still works.
 - Definitions are skipped during normal main-program execution. They must be
   at global scope, outside loops; nested function definitions are not supported.
   `FUNCTION`, `FEND`, `LOCAL` and `CONST` must be on their own physical lines, not inside
@@ -865,6 +877,222 @@ DIM p AS Math.Point = NEW Math.Point(x = 1, y = 2)
   qualified, e.g. `(in function MATH.SQUARE)`, and `ERRFUNC$()` returns the
   qualified name.
 
+## Unit testing
+
+Programs can carry their own unit tests: `TEST` blocks plus `ASSERT*`
+statements, run by `basic-vm --test`. Runnable example:
+[testing.bas](../examples/testing.bas); a real library suite is at the end of
+[lib/complexutil.bas](../examples/lib/complexutil.bas).
+
+```basic
+FUNCTION Clamp(PARAMETER v, PARAMETER lo, PARAMETER hi)
+  IF v < lo THEN
+    Clamp = lo
+  ELSEIF v > hi THEN
+    Clamp = hi
+  ELSE
+    Clamp = v
+  END IF
+FEND
+
+TEST Clamp_limitsBothEnds          ' setup, execute, evaluate
+  ASSERTEQ 0, Clamp(-5, 0, 10)
+  ASSERTEQ 10, Clamp(15, 0, 10), "upper bound"
+END TEST
+```
+
+### `TEST name` ... `END TEST`
+
+- `name` is a single identifier (letters, digits, `_`; not a keyword, no `$`).
+  Convention: `Function` or `Function_case`, e.g. `Add_handlesNegatives`. Names
+  are case-insensitive and must be unique within a file.
+- The block is only legal at the **top level** of a file (the main program or an
+  imported module), on its own lines. Inside a `FUNCTION`, `CLASS`, `TYPE`,
+  `TRY`, `IF`, a loop or another `TEST` it is a compile error, as are a
+  duplicate name, a missing name, a missing `END TEST`, `END TEST`/`EXIT TEST`
+  without a `TEST`, `FEND` closing a `TEST`, and `EXIT FUNCTION` inside a
+  `TEST` (use `EXIT TEST`).
+- A test is compiled as a hidden function without parameters or result, in its
+  file's scope: it sees that file's functions, classes, types and constants
+  unqualified (like a module's own functions), has its own `LOCAL` scope and
+  its own labels (`GOTO`/line numbers cannot cross the `TEST` boundary), and can
+  read and write the file's global variables. The body is ordinary code:
+  setup, calls, `LOCAL`, any control flow, `TRY`/`CATCH`.
+- `EXIT TEST` ends the test early; it counts as a pass. It is the only way to
+  pass early: `END` and `STOP` inside a test (or in a function it calls) make
+  the test an **ERROR** with the message `test ended by END` / `test ended by
+  STOP`, because they would silently skip the remaining assertions. A `TRY`
+  inside the test cannot catch them. In a normal run `END`/`STOP` are unchanged.
+- A test **passes** when it ends without an uncaught error, **fails** when an
+  assertion fails (or a file is leaked, see below), and **errors** on any other
+  uncaught runtime error (`THROW`, division by zero, bounds, call depth limit,
+  `END`/`STOP`, ...). There is no explicit result.
+- In a normal run (`basic-vm prog.bas`) the `TEST` blocks are jumped over and
+  have no effect at all.
+- `TEST`, `ASSERT`, `ASSERTEQ` and `ASSERTNEAR` are recognised only at the
+  start of a statement and only when no `=`, `[` or `.` follows, so they are not
+  reserved: `TEST = 5`, `PRINT TEST`, `DIM TEST(2)`, `TEST[1] = 7` and `obj.ASSERT`
+  keep working in older programs. (A line that is just `TEST` with no name is
+  the "missing name" compile error.)
+
+### Assertions
+
+`ASSERT`, `ASSERTEQ` and `ASSERTNEAR` can be used anywhere (also in normal
+programs). When they fail they raise a runtime error that `TRY`/`CATCH` can
+catch; `CATCH e$` receives the message. Uncaught, the error carries the
+statement's file and line like any other runtime error, and the name of the
+function if it was raised inside a called function. Assertion failures are
+flagged internally (`Error::assertion`), so the test report can tell a
+**FAIL** from an **ERROR** without matching message text. The flag survives a
+bare `THROW` rethrow and `FINALLY`; an error thrown from a `CATCH` is a new,
+ordinary error.
+
+| Statement | Passes when | Failure message |
+| --- | --- | --- |
+| `ASSERT cond [, msg$]` | `cond` is numeric and nonzero (same truth as `IF`) | `ASSERT failed` |
+| `ASSERTEQ expected, actual [, msg$]` | the values are equal (below) | `ASSERTEQ failed: expected 5, got 6` |
+| `ASSERTNEAR expected, actual, eps [, msg$]` | `ABS(expected - actual) <= eps` | `ASSERTNEAR failed: expected 1, got 1.5 (difference 0.5, allowed 0.1)` |
+
+- An optional message (a string) is appended as `... - msg`, e.g.
+  `ASSERTEQ failed: expected 5, got 6 - total after discount`. In the test
+  report control characters in the message are escaped like the values are
+  (`\n`, `\r`, `\t`, others as `\u{1b}`), so every result stays on one line;
+  ordinary Unicode text is shown as is. The same applies to the text of an
+  `ERROR` line (for example a `THROW` message with a newline). `CATCH e$` and
+  `Error::message` keep the raw text.
+- Argument counts are checked at compile time (`ASSERT` 1-2, `ASSERTEQ` 2-3,
+  `ASSERTNEAR` 3-4). The arguments are a comma list, not a call: `ASSERTEQ(1, 1)`
+  with parentheses around the whole list is a compile error (it reads `(1, 1)` as
+  one expression); the message ends with a hint, `write ASSERTEQ expected, actual
+  without parentheses around the argument list`. Write `ASSERTEQ 1, 1`.
+  Parentheses inside an argument are fine: `ASSERT (a > b) AND c`, `ASSERT (a)`,
+  `ASSERTEQ (a + 1) * 2, 6`. Wrong *types* are ordinary runtime errors, not assertion
+  failures: a non-numeric `ASSERT` condition, a non-string message,
+  non-numeric `ASSERTNEAR` operands, or an `eps` that is negative or not finite.
+- **Equality for `ASSERTEQ`**: numbers by value, exactly as `=` compares them
+  (`3 = 3.0`; an `INT64` is compared with a double without rounding, so
+  `9007199254740993&` is *not* equal to `9007199254740992.0`); strings by
+  content; booleans are `1`/`0`; `NOTHING` equals `NOTHING`. Lists and arrays
+  are compared element by element (order matters; a list is not equal to an
+  array). Maps compare keys and values, insertion order does not matter.
+  Records compare by type and fields. Nested collections are compared deeply and
+  cycle-safely; two references to the *same* collection or record are equal
+  immediately, without walking it. Values of different kinds are simply unequal
+  (a failure, never an error).
+- **Message rendering**: strings are quoted (`"` doubled, `\n \r \t` escaped,
+  cut off after 60 characters); collections are summarised as `LIST(1, 2, 3)`,
+  `ARRAY(..)`, `MAP("k": v)` with at most 8 elements, nesting depth 3 (deeper
+  levels print `LIST(...)`) and about 160 characters in total; records print
+  as `TYPENAME(FIELD = value, ...)`.
+
+### Running tests
+
+```text
+basic-vm --test [--test-filter text] [--test-imports] prog.bas
+```
+
+`--run-tests` is an alias of `--test`. All options come before the program path.
+
+| Option | Meaning |
+| --- | --- |
+| `--test`, `--run-tests` | Run the unit tests of the program instead of the program. |
+| `--test-filter text` | Only run tests whose full name contains `text` (case-insensitive). |
+| `--test-imports` | Also run the tests declared in imported modules. Without it only the tests of the program file itself run. |
+
+- The **main program body is not executed**, so programs that draw, loop or
+  read input do not start. Imported modules' top-level initialisation runs as in
+  a normal run (imports hoisted, once). Of the program file's own top level, only
+  `CONST` and `DIM` statements are re-run before each test (so tests can use the
+  file's constants and arrays); use literals, other constants or pure built-ins
+  like `LIST()` as initialisers. Other top-level statements such as `x = 5` are
+  *not* run, so a test that reads such a variable gets "undefined variable X".
+- Running a module file directly (`basic-vm --test examples\lib\complexutil.bas`)
+  runs that module's own tests, as it is the program file. Its tests are
+  unqualified and its non-`CONST`/`DIM` top-level statements are not run.
+- **Isolation**: every test runs in a *fresh VM* created from the compiled
+  program, so globals, the heap, open files and the `RND` state (including any
+  `RANDOMIZE` seed) are never shared between tests. Tests run in source order.
+- stdin is empty (`INPUT` raises an error, so the test errors) and there are no program
+  arguments (`ARGC()` is `0`). Graphics always use the in-memory headless
+  backend, even when the code calls `SCREEN`; `SCREENSHOT "file.png"` still
+  works. Output (`PRINT`, console) is captured and shown only when the test did
+  not pass.
+- **Captured output is capped** at 64 KiB per test (`basic_vm::MAX_CAPTURED_OUTPUT`):
+  the first 64 KiB are kept and later writes are silently discarded (never an
+  error; the test runs on normally). When the output of a non-passing test was
+  cut, its listing ends with `    ... output truncated (N bytes omitted)`.
+- **`SLEEP` returns immediately** in test mode (no real waiting, also with a
+  screen open, where pending events are still serviced). `TIMER()` includes the
+  skipped time, so `SLEEP 1000` advances it by 1 s and polling loops such as
+  `WHILE TIMER() < t + 1: SLEEP 10: WEND` terminate at once. Other clocks
+  (`UNIXTIME`, `NOW$`, `DATE$`, `TIME$`) are real time and are not adjusted.
+- **Resource leaks**: a file still `OPEN` when a test ends is closed and makes
+  an otherwise passing test fail with
+  `resource leak: file #1 still open at the end of the test (CLOSE it)`
+  (located at the test's header line). Use `TRY ... FINALLY CLOSE #n` in tests.
+
+### Report and exit codes
+
+One line per test on stdout, in source order: the program file's tests first,
+then, with `--test-imports`, the modules' tests in import order. The report is
+**streamed**: each result (and its indented output) is printed and flushed as
+soon as that test finishes, followed by the summary, so progress is visible
+while a long suite runs. Module tests are qualified with the alias as written in
+the importing file (`Cx.Add_basic`). A module file is loaded once however often
+it is imported: if the same file is imported under two aliases, its tests run
+once, under the **first** alias. A numeric suffix is only added when a
+*different* module file reuses an alias that is already taken, e.g. a nested
+`IMPORT "n.bas" AS Inner` and a later top-level `IMPORT "m.bas" AS inner` give
+`Inner.T2` and `inner#2.T1`. Tests of nested modules show their own alias
+(`Inner.T2`), not the path through the importer. The location is
+the path as given on the command line for the main file, or the module file's
+resolved path for modules.
+
+```text
+FAIL Twice_basic: ASSERTEQ failed: expected 6, got 7 (f.bas:7)
+    checking
+PASS Twice_ok
+ERROR Twice_boom: boom (f.bas:15)
+3 tests: 1 passed, 1 failed, 1 errors
+```
+
+- `PASS name`, `FAIL name: message (file:line)`, `ERROR name: message
+  (file:line)`. Failures inside a called function add `, in function NAME`
+  (upper-case, qualified for modules) after the line. The captured output of
+  tests that did not pass is printed indented by four spaces below their line.
+- The last line is `N tests: P passed, F failed, E errors`.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | At least one test ran and all passed. |
+| `1` | A test failed or errored; or compile/IO errors (`basic-vm: line N: ...` on stderr); or no tests were found (`basic-vm: no tests found` on stderr, also when the filter matches nothing). |
+| `2` | Command-line misuse: `--test` together with `--dump-bytecode`, `--screenshot`, `--auto-close-ms`, `--max-frames` or `--headless-graphics`; program arguments after the path; a missing path; `--test-filter` without text; `--test-imports`/`--test-filter` without `--test`. Usage on stderr, nothing on stdout. |
+
+Library API: `run_tests(&program, &TestOptions { filter, include_imports })`
+(with `program` from `compile`/`compile_file`) returns a `TestReport` whose
+`results` hold a `TestResult` (name, `TestStatus` Passed/Failed/Errored,
+message, file, line, function, captured output, `output_omitted` bytes) per
+test; `report.render(name)` produces the lines above, and `Program::tests()`
+lists the compiled `TestCase`s. `run_tests_with(&program, &options, |result| ..)`
+calls the closure as each test finishes (this is what the CLI uses to stream).
+
+### Testing limitations
+
+- Tests cannot mock or stub functions, files or input; there is **no per-test
+  timeout**, so an endless loop in a test hangs the run (stop it with Ctrl+C;
+  the results of the finished tests have already been printed). Unbounded
+  *recursion* is not a hang: the [call depth limit](#functions-and-local-variables)
+  turns it into an `ERROR`.
+- The main program body is not run (see above); there is no `SETUP`/`TEARDOWN`
+  or test grouping - share setup with a helper `FUNCTION`.
+- State isolation is by fresh VM per test, which costs one program load (a
+  clone of the compiled program) per test, including the imported modules'
+  initialisation. This cost is not optimised.
+- A UTF-8 byte order mark at the start of a source file is not handled
+  specially.
+- Report names show functions upper-cased; there is no stack trace beyond the
+  failing function.
+
 ## Console, graphics and events
 
 ### Text console
@@ -878,7 +1106,7 @@ a terminal. If `COLOR` was used, `ESC[0m` is written when the program ends.
 | `CLS` | `ESC[2J ESC[H` |
 | `COLOR fg [, bg]` | QBasic colours 0-15 (0-7 normal, 8-15 bright) as SGR codes |
 | `LOCATE row [, col]` | `ESC[row;colH`, 1-based, column defaults to 1 |
-| `SLEEP ms` | Pause 0..3,600,000 ms (via the key provider / graphics backend, so tests never really sleep) |
+| `SLEEP ms` | Pause 0..3,600,000 ms (via the key provider / graphics backend). Under `--test` it returns immediately and only advances `TIMER()` |
 | `INKEY$()` | Next pending key or `""`; never blocks |
 
 `INKEY$()` uses the `KeyProvider` trait (`poll_key`, `sleep`). The CLI's
@@ -908,7 +1136,7 @@ with `no graphics screen` unless `SCREEN w, h` was executed.
 
 | Statement | Meaning |
 | --- | --- |
-| `SCREEN w, h [, title$]` | Open a w x h canvas (1..4096), reopening if needed. `SCREEN 0` closes it (the last canvas stays readable through `Vm::canvas()`). |
+| `SCREEN w, h [, title$ [, buffers]]` | Open a w x h canvas (1..4096), reopening if needed. `buffers` is `1` (default, single-buffered) or `2` (double-buffered, see below); anything else is an error. `SCREEN 0` releases the screen and all its buffers (after the program has ended the last active canvas stays readable through `Vm::canvas()`). |
 | `GCLS [color]` | Clear the canvas |
 | `GCOLOR color` | Set the default colour |
 | `PSET x, y [, color]` | Set one pixel |
@@ -916,12 +1144,91 @@ with `no graphics screen` unless `SCREEN w, h` was executed.
 | `LINE x1, y1, x2, y2 [, color], B` / `BF` | Box outline / filled box (corners in any order); omit colour with `, , B` |
 | `CIRCLE x, y, r [, color [, FILL]]` | Midpoint circle, `r` in 0..1,000,000; `CIRCLE x, y, r, , FILL` uses the default colour |
 | `TEXT x, y, text$ [, color]` | Built-in 8x8 font (ASCII 32-126, other characters draw `?`); (x, y) is the top-left of the first cell |
-| `FLIP` / `PRESENT` | Present the frame and poll events (no handlers run) |
+| `FLIP` / `PRESENT` | Present the frame and poll events (no handlers run). In double-buffered mode this publishes the active buffer and swaps the buffers (below) |
+| `FLIP CLEAR` / `PRESENT CLEAR` | Like `FLIP`, then clear the new back buffer to black. Double-buffered mode only |
+| `BUFFER n` | Direct drawing at buffer `n` (1 or 2) |
+| `COPYBUFFER src, dst` | Copy the whole of buffer `src` onto buffer `dst` (same size, so no clipping) |
+| `SCREENSHOT file$ [, VISIBLE]` | Save a buffer to an image file (see below) |
 
 Functions: `POINT(x, y)` (packed colour, or -1 when outside the canvas),
-`ISGRAPHICS()`, `WINDOWOPEN()`, `SCREENW()`, `SCREENH()`, `RGB(r,g,b)`.
-Frames are also presented automatically by `DOEVENTS`, `SLEEP` (when something
-changed) and at the end of the run.
+`ISGRAPHICS()`, `WINDOWOPEN()`, `SCREENW()`, `SCREENH()`, `RGB(r,g,b)`,
+`BUFFERS()` (1 or 2), `ACTIVEBUFFER()` and `VISIBLEBUFFER()` (1-based buffer numbers).
+The buffer statements and functions fail with `no graphics screen` without `SCREEN`.
+
+Geometry helpers (all buffers share one size; all need `SCREEN`):
+
+| Function | Result |
+|---|---|
+| `WIDTH()` / `HEIGHT()` | Screen size in pixels (same as `SCREENW()` / `SCREENH()`) |
+| `CENTERX()` / `CENTERY()` | The pixel at the middle: `INT(WIDTH() / 2)` and `INT(HEIGHT() / 2)` (so 320 for a 640-wide screen and 2 for a 5-wide one) |
+| `CENTER()` | A new two-element list `[CENTERX(), CENTERY()]`, e.g. `c = CENTER()` then `CIRCLE c[1], c[2], 20` |
+| `INSIDE(x, y)` | TRUE (1) when the pixel lies on the screen, else FALSE (0). Fractions are truncated like in `PSET`; it does not touch the pixel, so it works as a clipping test before `PSET`/`POINT` |
+
+#### Presenting in single-buffered mode
+
+Frames are presented automatically by `DOEVENTS`, `SLEEP` (when something
+changed) and at the end of the run, as well as by `FLIP`. `BUFFER 1` and
+`COPYBUFFER 1, 1` are accepted (and do nothing); buffer 2, `FLIP CLEAR`
+and `SCREEN w, h, t$, 3` are explicit errors.
+
+#### Double buffering
+
+`SCREEN w, h, title$, 2` creates two same-size buffers numbered 1 and 2. The window
+(backend) only ever shows the **visible** (front) buffer. Every drawing statement
+(`GCLS`, `PSET`, `LINE`, `CIRCLE`, `TEXT`) and `POINT` and `SCREENSHOT` work on the
+**active** (back) buffer, so a half-drawn frame is never displayed. At `SCREEN`, buffer 1
+is visible and buffer 2 is active; both start black.
+
+- `FLIP` presents the active buffer to the backend (it becomes the visible one) and then
+  makes the *other* buffer the active one. This is a true page flip: **the new back buffer
+  is not cleared**; it still holds the frame that was shown before, i.e. the frame from
+  two flips ago. Animations normally start each frame with `GCLS`; use `FLIP CLEAR` to get
+  a black back buffer instead (equivalent to `FLIP` followed by `GCLS 0`).
+- `BUFFER n` sends drawing to buffer `n` (offscreen drawing). `BUFFER` with the visible
+  buffer draws into what is on screen; the next `DOEVENTS`/`SLEEP`/end of run presents
+  that change (only a changed visible buffer is presented). `FLIP` after `BUFFER 1` presents
+  buffer 1 and then switches drawing to buffer 2.
+- `COPYBUFFER src, dst` copies all pixels, e.g. `COPYBUFFER VISIBLEBUFFER(), ACTIVEBUFFER()`
+  starts a frame from what is shown. `src = dst` is allowed and does nothing.
+- `DOEVENTS`, `SLEEP` and the end of the run never present the hidden buffer: only `FLIP`
+  publishes frames. The last flipped frame therefore stays the final presented frame
+  (what `--screenshot` saves) even when a half-finished frame was being drawn.
+- `--max-frames` counts presented frames, so in double-buffered mode it counts flips.
+- `SCREEN 0` or reopening `SCREEN` releases both buffers, and the active/visible state is reset.
+
+#### SCREENSHOT
+
+`SCREENSHOT file$ [, VISIBLE]` writes the **active** buffer (what drawing currently
+targets; in single-buffered mode that is the one canvas) to `file$`. `VISIBLE` saves
+the front buffer, i.e. what the window currently shows (the same canvas in
+single-buffered mode). It reads the framebuffer, not the screen, so it works
+headless and with a real window, and it does not present or change anything.
+The format follows the case-insensitive extension: `.ppm` (P6), `.bmp` (24-bit) or `.png`
+(8-bit RGB, written with uncompressed deflate blocks, so the files are valid but large).
+A missing or other extension is an error. An existing file is overwritten (the file is
+written directly, no temporary file). A file that is currently `OPEN`ed by the program
+is refused. Failures (missing directory, permission, ...) are normal runtime errors
+that `TRY` can catch. `SCREENSHOT` and `BUFFER` stay usable as variable names.
+
+```
+SCREEN 160, 120, "Anim", 2
+FOR F = 0 TO 59
+    GCLS 1
+    CIRCLE 10 + 2 * F, 40 + F, 8, 14, FILL
+    FLIP
+    DOEVENTS
+    SLEEP 16
+NEXT F
+SCREENSHOT "last.png", VISIBLE
+```
+
+Backend additions (non-breaking): `GraphicsBackend::open_buffered(w, h, title, buffers)`
+has a default implementation calling `open`, so existing backends keep working and
+simply receive `present(&Canvas)` calls with the frame being published.
+`HeadlessBackend::front_frame()` returns the last presented frame, `buffers()` the
+requested buffer count, and `record_frames(limit)` keeps the last `limit` presented
+frames for `frame_history()` (off by default). `ImageFormat` and `Canvas::to_png()` /
+`encode(format)` are exported for embedding.
 
 ### Events
 
@@ -959,7 +1266,7 @@ inside a handler is an error. `ON TIMER` is not implemented.
 
 ### Desktop window
 
-Without `--headless-graphics`, `SCREEN w, h [, title$]` opens a real window through the
+Without `--headless-graphics`, `SCREEN w, h [, title$ [, buffers]]` opens a real window through the
 `WindowBackend` (src/window.rs). It uses the [`minifb`](https://crates.io/crates/minifb)
 crate: pure Rust, no C compiler, SDK or DLL to install, a plain pixel-buffer
 API that matches the `Canvas` exactly (Win32, X11/Wayland and Cocoa). The window is
@@ -980,14 +1287,16 @@ gives a headless-only binary where `SCREEN` without `--headless-graphics` report
 no window backend is available. On Linux a running X11 or Wayland session is required;
 the unattended-run options below help automated checks.
 
-Examples: `examples/graphics.bas` (static scene) and `examples/paint.bas`
-(mouse and keyboard handlers).
+Examples: `examples/graphics.bas` (static scene), `examples/paint.bas`
+(mouse and keyboard handlers) and `examples/animation.bas` (double-buffered,
+flicker-free animation of 60 frames).
 
 ### Command line
 
-`basic-vm [--dump-bytecode] [--headless-graphics] [--auto-close-ms n] [--max-frames n] [--screenshot file.ppm|file.bmp] program.bas [args]`
+`basic-vm [--dump-bytecode] [--headless-graphics] [--auto-close-ms n] [--max-frames n] [--screenshot file.ppm|file.bmp|file.png] program.bas [args]`
 Flags must come before the program path. `--screenshot` implies
-`--headless-graphics` and writes the last presented frame (PPM P6 or 24-bit BMP).
+`--headless-graphics` and writes the last presented frame (PPM P6, 24-bit BMP or PNG,
+chosen by the extension). In double-buffered mode that is the last flipped frame.
 `--auto-close-ms n` / `--max-frames n` are bounded validation aids: once the graphics
 screen has been open for n ms, or n frames were presented, every event poll also reports a
 close request (`CLOSED()`, `ON CLOSE`). They work with the window and the headless

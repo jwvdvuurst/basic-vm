@@ -34,6 +34,68 @@ pub(crate) enum Token {
     ColonEqual,
 }
 
+/// The identifier-like words of a line exactly as written (the lexer
+/// upper-cases them), skipping strings, numbers and comments. Used to show
+/// test names and module aliases in their original spelling.
+pub(crate) fn spelled_words(source: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => break,
+            '"' => loop {
+                match chars.next() {
+                    Some('"') if chars.peek() == Some(&'"') => {
+                        chars.next();
+                    }
+                    Some('"') | None => break,
+                    Some(_) => {}
+                }
+            },
+            ch if ch.is_ascii_digit() => {
+                while chars
+                    .peek()
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '.')
+                {
+                    chars.next();
+                }
+            }
+            '&' if matches!(chars.peek(), Some('H' | 'h')) => {
+                while chars.peek().is_some_and(char::is_ascii_alphanumeric) {
+                    chars.next();
+                }
+            }
+            ch if ch.is_ascii_alphabetic() || ch == '_' => {
+                let mut word = String::from(ch);
+                while chars
+                    .peek()
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                {
+                    word.push(chars.next().unwrap());
+                }
+                if chars.peek() == Some(&'$') {
+                    word.push(chars.next().unwrap());
+                }
+                if word.eq_ignore_ascii_case("REM") {
+                    break;
+                }
+                words.push(word);
+            }
+            _ => {}
+        }
+    }
+    words
+}
+
+/// The spelling of the word that follows `keyword` on the line.
+pub(crate) fn spelled_after(source: &str, keyword: &str) -> Option<String> {
+    let words = spelled_words(source);
+    let position = words
+        .iter()
+        .position(|word| word.eq_ignore_ascii_case(keyword))?;
+    words.into_iter().nth(position + 1)
+}
+
 pub(crate) fn lex(source: &str, line: usize) -> Result<Vec<Token>, Error> {
     let mut chars = source.chars().peekable();
     let mut tokens = Vec::new();

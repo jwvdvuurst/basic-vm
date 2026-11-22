@@ -7,9 +7,9 @@ use std::sync::Arc;
 use crate::Error;
 use crate::bytecode::{
     BinaryOp, Builtin, CallBinding, CollectionKind, EventKind, FieldDefault, Function, Instruction,
-    Op, ParamInfo, Place, Program, RecordField, RecordType, RefArg, VarType,
+    Op, ParamInfo, Place, Program, RecordField, RecordType, RefArg, TestCase, VarType,
 };
-use crate::lexer::{Token, lex};
+use crate::lexer::{Token, lex, spelled_after};
 use crate::value::float_to_int;
 
 /// The record types of a program, gathered before the main pass so that
@@ -116,6 +116,20 @@ fn collect_types(
             Err(_) => continue,
         };
         if let Some(raw) = open.as_mut() {
+            if let [Token::Word(test), Token::Word(next), ..] = tokens.as_slice()
+                && test == "TEST"
+                && next != "AS"
+                && !in_method
+            {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "TEST blocks must be at the top level, not inside {} {}",
+                        if raw.is_class { "CLASS" } else { "TYPE" },
+                        raw.name
+                    ),
+                ));
+            }
             if raw.is_class {
                 if in_method {
                     in_method = tokens != [Token::Word("FEND".into())];
@@ -614,6 +628,8 @@ struct Import {
     line: usize,
     path: String,
     alias: String,
+    /// The alias as written (or the file stem), for display in test names.
+    spelled: String,
 }
 
 fn scan_imports(source: &str) -> Result<Vec<Import>, Error> {
@@ -625,8 +641,13 @@ fn scan_imports(source: &str) -> Result<Vec<Import>, Error> {
             continue;
         };
         match tokens.as_slice() {
-            [Token::Word(word), Token::Word(_), ..] if word == "FUNCTION" => in_function = true,
+            [Token::Word(word), Token::Word(_), ..] if word == "FUNCTION" || word == "TEST" => {
+                in_function = true;
+            }
             [Token::Word(word)] if word == "FEND" => in_function = false,
+            [Token::Word(end), Token::Word(test)] if end == "END" && test == "TEST" => {
+                in_function = false;
+            }
             [Token::Word(word), Token::String(path), rest @ ..] if word == "IMPORT" => {
                 if in_function {
                     // The main pass reports IMPORT inside a function.
@@ -647,10 +668,19 @@ fn scan_imports(source: &str) -> Result<Vec<Import>, Error> {
                         return Err(Error::new(line, "expected IMPORT \"path\" [AS alias]"));
                     }
                 };
+                let spelled = match rest {
+                    [] => Path::new(path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => spelled_after(text, "AS").unwrap_or_else(|| alias.clone()),
+                };
                 imports.push(Import {
                     line,
                     path: path.clone(),
                     alias,
+                    spelled,
                 });
             }
             _ => {}
@@ -726,6 +756,22 @@ struct Linker {
     /// Canonical path and display path of the modules being loaded.
     loading: Vec<(PathBuf, String)>,
     prefixes: HashSet<String>,
+    /// `TEST` blocks of every module compiled so far.
+    tests: Vec<TestCase>,
+    /// Where the main program's own code starts (after the imported modules).
+    main_start: usize,
+    /// Instruction ranges of the main program's top-level `CONST`/`DIM`.
+    prelude: Vec<std::ops::Range<usize>>,
+}
+
+/// A `TEST` block recorded by the parser of one module.
+struct RawTest {
+    /// Upper-cased name, for duplicate detection.
+    key: String,
+    /// The name as written.
+    name: String,
+    line: usize,
+    function: usize,
 }
 
 /// Renames the variable names of an instruction; calls pass their BYREF
@@ -804,7 +850,7 @@ fn compile_unit(source: &str, path: Option<&Path>) -> Result<Program, Error> {
     {
         linker.loading.push((canonical, display_path(path)));
     }
-    linker.compile_module(source, &directory, "", 0)?;
+    linker.compile_module(source, &directory, "", "", 0)?;
     linker.finish(source.lines().count().max(1))
 }
 
@@ -861,10 +907,12 @@ impl Linker {
             prefix = format!("{}#{copies}", import.alias);
         }
         let file = self.files.len();
+        // The alias as written, with the `#n` suffix of repeated imports.
+        let shown = format!("{}{}", import.spelled, &prefix[import.alias.len()..]);
         self.files.push(display.clone());
         self.loading.push((canonical.clone(), display.clone()));
         let module_directory = resolved.parent().map(Path::to_path_buf).unwrap_or_default();
-        let result = self.compile_module(&text, &module_directory, &prefix, file);
+        let result = self.compile_module(&text, &module_directory, &prefix, &shown, file);
         self.loading.pop();
         let exports = Rc::new(result.map_err(|mut error| {
             error.file.get_or_insert(display);
@@ -946,11 +994,15 @@ impl Linker {
             };
             *target = function;
         }
+        self.tests.sort_by_key(|test| test.file);
         Ok(Program {
             instructions: self.instructions,
             functions: self.functions,
             types: self.types,
             files: self.files,
+            tests: self.tests,
+            main_start: self.main_start,
+            prelude: self.prelude,
         })
     }
 
@@ -959,6 +1011,7 @@ impl Linker {
         source: &str,
         directory: &Path,
         prefix: &str,
+        shown_prefix: &str,
         file: usize,
     ) -> Result<Exports, Error> {
         let mut aliases: HashMap<String, Rc<Exports>> = HashMap::new();
@@ -977,6 +1030,9 @@ impl Linker {
             aliases.insert(import.alias, exports);
         }
         let module_start = (self.instructions.len(), self.functions.len());
+        if file == 0 {
+            self.main_start = module_start.0;
+        }
         let table = collect_types(source, self.types.len(), prefix, imported_types)?;
         let TypeTable {
             types: new_types,
@@ -1003,6 +1059,7 @@ impl Linker {
         let mut try_labels = HashSet::new();
         let mut declarations = Declarations::default();
         let mut function_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut raw_tests: Vec<RawTest> = Vec::new();
         for (index, source_line) in source.lines().enumerate() {
             let line = index + 1;
             if line <= skip_until {
@@ -1048,8 +1105,23 @@ impl Linker {
                     try_labels.insert((scope, label));
                 }
             }
+            // Top-level CONST/DIM of the main program are re-run before each
+            // of its tests (see `Program::prelude`).
+            let starts_prelude = file == 0
+                && current_function.is_none()
+                && blocks.is_empty()
+                && match tokens.as_slice() {
+                    [Token::Word(word), ..] if word == "CONST" => true,
+                    [Token::Word(word), next, ..] if word == "DIM" => {
+                        !matches!(next, Token::Equal | Token::LeftBracket | Token::Dot)
+                    }
+                    _ => false,
+                };
+            let before = self.instructions.len();
             let mut parser = Parser {
                 tokens: &tokens,
+                text: source_line,
+                tests: &mut raw_tests,
                 position: 0,
                 line,
                 file,
@@ -1079,6 +1151,9 @@ impl Linker {
                     return Err(Error::new(line, "unexpected tokens after statement"));
                 }
             }
+            if starts_prelude {
+                self.prelude.push(before..self.instructions.len());
+            }
         }
         if let Some(block) = blocks.last() {
             return Err(Error::new(block.line(), block.unterminated()));
@@ -1086,8 +1161,21 @@ impl Linker {
         if let Some(context) = current_function {
             return Err(Error::new(
                 context.line,
-                "unterminated FUNCTION; expected FEND",
+                if context.test {
+                    "unterminated TEST; expected END TEST"
+                } else {
+                    "unterminated FUNCTION; expected FEND"
+                },
             ));
+        }
+        for test in raw_tests {
+            self.tests.push(TestCase {
+                name: test.name,
+                module: shown_prefix.to_string(),
+                file,
+                line: test.line,
+                function: test.function,
+            });
         }
         for (index, label, line, scope) in jumps {
             let target = labels.get(&(scope, label)).copied().ok_or_else(|| {
@@ -1196,6 +1284,10 @@ fn line_number(token: &Token, line: usize) -> Result<u32, Error> {
 
 struct Parser<'a> {
     tokens: &'a [Token],
+    /// The source text of the line, for the original spelling of names.
+    text: &'a str,
+    /// `TEST` blocks of the module being compiled.
+    tests: &'a mut Vec<RawTest>,
     position: usize,
     line: usize,
     /// File id of the module being compiled (0 is the main program).
@@ -1241,6 +1333,8 @@ struct Declarations {
 
 struct FunctionContext {
     index: usize,
+    /// A hidden `TEST` function rather than a user `FUNCTION`.
+    test: bool,
     skip: usize,
     line: usize,
     exits: Vec<usize>,
@@ -1692,7 +1786,7 @@ impl Parser<'_> {
         }
         let ends_block = self.peek() == Some(&Token::Word("END".into()))
             && matches!(self.tokens.get(self.position + 1),
-                Some(Token::Word(word)) if word == "IF" || word == "SELECT" || word == "TRY");
+                Some(Token::Word(word)) if word == "IF" || word == "SELECT" || word == "TRY" || word == "TEST");
         let legacy_name = matches!(self.peek(), Some(Token::Word(word))
             if matches!(word.as_str(), "TRY" | "CATCH" | "FINALLY"))
             && self.assignment_follows();
@@ -1775,6 +1869,7 @@ impl Parser<'_> {
                 });
                 *self.current_function = Some(FunctionContext {
                     index,
+                    test: false,
                     skip,
                     line: self.line,
                     exits: Vec::new(),
@@ -1782,42 +1877,37 @@ impl Parser<'_> {
                     fills: HashMap::new(),
                 });
             }
+            Some(Token::Word(word)) if word == "TEST" && !self.assignment_follows() => {
+                self.next();
+                self.test_header(top_level)?;
+            }
             Some(Token::Word(word)) if word == "FEND" => {
                 self.next();
                 let context = self
                     .current_function
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| Error::new(self.line, "FEND without FUNCTION"))?;
+                if context.test {
+                    return Err(Error::new(
+                        self.line,
+                        "FEND cannot close a TEST; use END TEST",
+                    ));
+                }
                 if !self.blocks.is_empty() {
                     return Err(Error::new(
                         self.line,
                         "FEND cannot close an unfinished loop or block",
                     ));
                 }
-                let skip = context.skip;
-                let index = context.index;
-                let exits = std::mem::take(&mut context.exits);
-                let return_at = self.emit(Op::Return);
-                for exit in exits {
-                    self.patch(exit, return_at);
-                }
-                self.instructions[skip].op = Op::Jump(self.instructions.len());
-                let entry = self.functions[index].entry;
-                self.function_ranges.push((entry, return_at));
-                if !self.prefix.is_empty() {
-                    // Names that are not locals of this function are globals
-                    // of this module: give them the module's prefix.
-                    let function = &self.functions[index];
-                    let mut locals: HashSet<String> = function.locals.iter().cloned().collect();
-                    locals.extend(function.parameters.iter().cloned());
-                    locals.insert(function.name.clone());
-                    qualify_globals(
-                        &mut self.instructions[entry..=return_at],
-                        self.prefix,
-                        &locals,
-                    );
-                }
-                *self.current_function = None;
+                self.end_function();
+            }
+            Some(Token::Word(word))
+                if matches!(word.as_str(), "ASSERT" | "ASSERTEQ" | "ASSERTNEAR")
+                    && !self.assignment_follows() =>
+            {
+                let keyword = word.clone();
+                self.next();
+                self.assert_statement(&keyword)?;
             }
             Some(Token::Word(word)) if word == "LOCAL" => {
                 self.next();
@@ -1919,10 +2009,36 @@ impl Parser<'_> {
                     Some(Token::Word(word)) if word == "WHILE" => LoopKind::While,
                     Some(Token::Word(word)) if word == "DO" => LoopKind::Do,
                     Some(Token::Word(word)) if exit && word == "FUNCTION" => {
-                        if self.current_function.is_none() {
+                        match self.current_function.as_ref() {
+                            None => {
+                                return Err(Error::new(
+                                    self.line,
+                                    "EXIT FUNCTION is only valid inside a function",
+                                ));
+                            }
+                            Some(context) if context.test => {
+                                return Err(Error::new(
+                                    self.line,
+                                    "EXIT FUNCTION is not valid inside a TEST; use EXIT TEST",
+                                ));
+                            }
+                            Some(_) => {}
+                        }
+                        let jump = self.emit_leave(0);
+                        if let Some(context) = self.current_function.as_mut() {
+                            context.exits.push(jump);
+                        }
+                        return Ok(());
+                    }
+                    Some(Token::Word(word)) if exit && word == "TEST" => {
+                        if !self
+                            .current_function
+                            .as_ref()
+                            .is_some_and(|context| context.test)
+                        {
                             return Err(Error::new(
                                 self.line,
-                                "EXIT FUNCTION is only valid inside a function",
+                                "EXIT TEST is only valid inside a TEST",
                             ));
                         }
                         let jump = self.emit_leave(0);
@@ -2348,10 +2464,20 @@ impl Parser<'_> {
                 self.next();
                 let mut builtin = builtin;
                 let mut arguments = 0;
-                // LINE and CIRCLE take a trailing B/BF or FILL flag word.
+                // FLIP / PRESENT take an optional trailing CLEAR word.
+                if matches!(builtin, Builtin::Flip | Builtin::Present)
+                    && self.position + 1 == self.tokens.len()
+                    && matches!(self.peek(), Some(Token::Word(word)) if word == "CLEAR")
+                {
+                    self.next();
+                    builtin = Builtin::FlipClear;
+                }
+                // LINE, CIRCLE and SCREENSHOT take a trailing B/BF, FILL or
+                // VISIBLE flag word.
                 let (fixed, flags): (usize, &[&str]) = match builtin {
                     Builtin::Line => (4, &["B", "BF"]),
                     Builtin::Circle => (3, &["FILL"]),
+                    Builtin::Screenshot => (1, &["VISIBLE"]),
                     _ => (0, &[]),
                 };
                 let mut flag = None;
@@ -2369,12 +2495,16 @@ impl Parser<'_> {
                         }
                         if fixed > 0 && arguments > fixed {
                             // After the colour only the flag word may follow.
-                            let message = if fixed == 4 {
-                                "LINE flag must be B or BF"
-                            } else {
-                                "CIRCLE flag must be FILL"
+                            let message = match builtin {
+                                Builtin::Line => "LINE flag must be B or BF",
+                                Builtin::Circle => "CIRCLE flag must be FILL",
+                                _ => "SCREENSHOT flag must be VISIBLE",
                             };
                             return Err(Error::new(self.line, message));
+                        }
+                        if builtin == Builtin::Screenshot && arguments == fixed {
+                            // Only the VISIBLE word may follow the file name.
+                            return Err(Error::new(self.line, "SCREENSHOT flag must be VISIBLE"));
                         }
                         if fixed > 0 && arguments == fixed && self.peek() == Some(&Token::Comma) {
                             // `LINE x1, y1, x2, y2, , B`: the colour is omitted.
@@ -2393,6 +2523,7 @@ impl Parser<'_> {
                     (Builtin::Line, Some("B")) => Builtin::LineBox,
                     (Builtin::Line, Some(_)) => Builtin::LineFill,
                     (Builtin::Circle, Some(_)) => Builtin::CircleFill,
+                    (Builtin::Screenshot, Some(_)) => Builtin::ScreenshotVisible,
                     (other, _) => other,
                 };
                 let (minimum, maximum) = builtin.arity();
@@ -2549,6 +2680,23 @@ impl Parser<'_> {
                 let kind = self.next();
                 if kind == Some(Token::Word("TRY".into())) {
                     self.end_try()?;
+                } else if kind == Some(Token::Word("TEST".into())) {
+                    let Some(context) = self.current_function.as_ref() else {
+                        return Err(Error::new(self.line, "END TEST without a matching TEST"));
+                    };
+                    if !context.test {
+                        return Err(Error::new(
+                            self.line,
+                            "END TEST cannot close a FUNCTION; expected FEND",
+                        ));
+                    }
+                    if !self.blocks.is_empty() {
+                        return Err(Error::new(
+                            self.line,
+                            "END TEST cannot close an unfinished loop or block",
+                        ));
+                    }
+                    self.end_function();
                 } else if kind == Some(Token::Word("IF".into())) {
                     let Some(Block::If {
                         pending, end_jumps, ..
@@ -2594,8 +2742,9 @@ impl Parser<'_> {
                 }
             }
             Some(Token::Word(word)) if word == "END" || word == "STOP" => {
+                let stop = word == "STOP";
                 self.next();
-                self.emit(Op::Halt);
+                self.emit(Op::Terminate { stop });
             }
             Some(Token::Word(word)) if word == "GC" => {
                 self.next();
@@ -2958,6 +3107,192 @@ impl Parser<'_> {
             *has_finally = true;
         }
         self.set_handler(begin, None, Some(finally_at));
+        Ok(())
+    }
+
+    /// `TEST name` header (after the keyword): opens a hidden function.
+    fn test_header(&mut self, top_level: bool) -> Result<(), Error> {
+        if !top_level || self.current_function.is_some() || !self.blocks.is_empty() {
+            let nested = self
+                .current_function
+                .as_ref()
+                .is_some_and(|context| context.test);
+            return Err(Error::new(
+                self.line,
+                if nested {
+                    "TEST blocks cannot be nested; close the TEST with END TEST first"
+                } else {
+                    "TEST blocks must be at the top level, outside functions, classes and blocks"
+                },
+            ));
+        }
+        let key = match self.next() {
+            None => {
+                return Err(Error::new(self.line, "TEST requires a name: TEST name"));
+            }
+            Some(Token::Word(name))
+                if !is_keyword(&name)
+                    && !name.ends_with('$')
+                    && VarType::parse(&name).is_none() =>
+            {
+                name
+            }
+            Some(_) => {
+                return Err(Error::new(
+                    self.line,
+                    "invalid test name; use a single identifier of letters, digits and _",
+                ));
+            }
+        };
+        if self.peek().is_some() {
+            return Err(Error::new(
+                self.line,
+                "TEST name must be the last thing on the line",
+            ));
+        }
+        let name = crate::lexer::spelled_after(self.text, "TEST").unwrap_or_else(|| key.clone());
+        if self.tests.iter().any(|test| test.key == key) {
+            return Err(Error::new(self.line, format!("duplicate test {name}")));
+        }
+        let skip = self.emit(Op::Jump(0));
+        let index = self.functions.len();
+        let hidden = format!("TEST {key}");
+        self.functions.push(Function {
+            qualified: if self.prefix.is_empty() {
+                hidden.clone()
+            } else {
+                format!("{}.{hidden}", self.prefix)
+            },
+            name: hidden,
+            entry: self.instructions.len(),
+            parameters: Vec::new(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            types: HashMap::new(),
+            class: None,
+        });
+        self.tests.push(RawTest {
+            key,
+            name,
+            line: self.line,
+            function: index,
+        });
+        *self.current_function = Some(FunctionContext {
+            index,
+            test: true,
+            skip,
+            line: self.line,
+            exits: Vec::new(),
+            constants: HashSet::new(),
+            fills: HashMap::new(),
+        });
+        Ok(())
+    }
+
+    /// Closes the current function or test: emits the return, patches the
+    /// exits and the skip jump, and qualifies a module's global names.
+    fn end_function(&mut self) {
+        let context = self
+            .current_function
+            .as_mut()
+            .expect("the caller checked for an open function");
+        let skip = context.skip;
+        let index = context.index;
+        let exits = std::mem::take(&mut context.exits);
+        let return_at = self.emit(Op::Return);
+        for exit in exits {
+            self.patch(exit, return_at);
+        }
+        self.instructions[skip].op = Op::Jump(self.instructions.len());
+        let entry = self.functions[index].entry;
+        self.function_ranges.push((entry, return_at));
+        if !self.prefix.is_empty() {
+            // Names that are not locals of this function are globals
+            // of this module: give them the module's prefix.
+            let function = &self.functions[index];
+            let mut locals: HashSet<String> = function.locals.iter().cloned().collect();
+            locals.extend(function.parameters.iter().cloned());
+            locals.insert(function.name.clone());
+            qualify_globals(
+                &mut self.instructions[entry..=return_at],
+                self.prefix,
+                &locals,
+            );
+        }
+        *self.current_function = None;
+    }
+
+    /// True when the statement's arguments start with a parenthesis whose
+    /// matching `)` encloses a top-level comma, as in `ASSERTEQ (1, 2)`.
+    fn arguments_wrapped_in_parentheses(&self) -> bool {
+        if self.peek() != Some(&Token::LeftParen) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for token in &self.tokens[self.position..] {
+            match token {
+                Token::LeftParen => depth += 1,
+                Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::Comma if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `ASSERT`, `ASSERTEQ` and `ASSERTNEAR` (after the keyword).
+    fn assert_statement(&mut self, keyword: &str) -> Result<(), Error> {
+        let (minimum, maximum) = match keyword {
+            "ASSERT" => (1, 2),
+            "ASSERTEQ" => (2, 3),
+            _ => (3, 4),
+        };
+        let mut count = 0;
+        if self.peek().is_some() {
+            let wrapped = self.arguments_wrapped_in_parentheses();
+            loop {
+                if let Err(mut error) = self.expression(0) {
+                    if wrapped {
+                        let form = match keyword {
+                            "ASSERT" => "ASSERT condition, message$",
+                            "ASSERTEQ" => "ASSERTEQ expected, actual",
+                            _ => "ASSERTNEAR expected, actual, epsilon",
+                        };
+                        error.message = format!(
+                            "{}; write {form} without parentheses around the argument list",
+                            error.message
+                        );
+                    }
+                    return Err(error);
+                }
+                count += 1;
+                if self.peek() == Some(&Token::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        if count < minimum || count > maximum {
+            return Err(Error::new(
+                self.line,
+                format!(
+                    "{keyword} requires {} arguments, got {count}",
+                    arity_text(minimum, maximum)
+                ),
+            ));
+        }
+        let has_message = count == maximum;
+        self.emit(match keyword {
+            "ASSERT" => Op::Assert { has_message },
+            "ASSERTEQ" => Op::AssertEq { has_message },
+            _ => Op::AssertNear { has_message },
+        });
         Ok(())
     }
 

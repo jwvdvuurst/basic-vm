@@ -253,6 +253,61 @@ impl Canvas {
         }
     }
 
+    /// Overwrites this canvas with the pixels of `source`, which must have
+    /// the same size. The dirty flag is set.
+    pub fn copy_from(&mut self, source: &Canvas) {
+        debug_assert_eq!((self.width, self.height), (source.width, source.height));
+        self.pixels.copy_from_slice(&source.pixels);
+        self.dirty = true;
+    }
+
+    /// The canvas encoded as `format`.
+    pub fn encode(&self, format: ImageFormat) -> Vec<u8> {
+        match format {
+            ImageFormat::Ppm => self.to_ppm(),
+            ImageFormat::Bmp => self.to_bmp(),
+            ImageFormat::Png => self.to_png(),
+        }
+    }
+
+    /// The canvas as a PNG image: 8-bit RGB, no interlacing, one `IDAT`
+    /// chunk holding a zlib stream of *stored* (uncompressed) deflate blocks.
+    /// Larger than a compressed PNG, but valid and dependency-free.
+    pub fn to_png(&self) -> Vec<u8> {
+        let mut raw = Vec::with_capacity((self.width * 3 + 1) * self.height);
+        for row in self.pixels.chunks(self.width) {
+            raw.push(0); // filter type "None"
+            for pixel in row {
+                raw.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]);
+            }
+        }
+        let mut zlib = Vec::with_capacity(raw.len() + raw.len() / 65535 * 5 + 16);
+        // CMF/FLG: deflate, 32 KiB window, no preset dictionary, check bits ok.
+        zlib.extend_from_slice(&[0x78, 0x01]);
+        let mut blocks = raw.chunks(STORED_BLOCK_MAX).peekable();
+        while let Some(block) = blocks.next() {
+            let is_last = blocks.peek().is_none();
+            zlib.push(u8::from(is_last)); // BFINAL, BTYPE = 00 (stored)
+            let length = block.len() as u16;
+            zlib.extend_from_slice(&length.to_le_bytes());
+            zlib.extend_from_slice(&(!length).to_le_bytes());
+            zlib.extend_from_slice(block);
+        }
+        zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+        let mut png = Vec::with_capacity(zlib.len() + 64);
+        png.extend_from_slice(&PNG_SIGNATURE);
+        let mut header = Vec::with_capacity(13);
+        header.extend_from_slice(&(self.width as u32).to_be_bytes());
+        header.extend_from_slice(&(self.height as u32).to_be_bytes());
+        // 8 bits per channel, colour type 2 (RGB), deflate, filter 0, no interlace.
+        header.extend_from_slice(&[8, 2, 0, 0, 0]);
+        png_chunk(&mut png, b"IHDR", &header);
+        png_chunk(&mut png, b"IDAT", &zlib);
+        png_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
     /// The canvas as a binary PPM (`P6`) image.
     pub fn to_ppm(&self) -> Vec<u8> {
         let mut bytes = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
@@ -288,6 +343,87 @@ impl Canvas {
         }
         bytes
     }
+}
+
+/// The image file formats a [`Canvas`] can be saved as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Ppm,
+    Bmp,
+    Png,
+}
+
+impl ImageFormat {
+    /// The format selected by the file extension (case-insensitive:
+    /// `.ppm`, `.bmp`, `.png`), or `None` for any other or no extension.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "ppm" => Some(Self::Ppm),
+            "bmp" => Some(Self::Bmp),
+            "png" => Some(Self::Png),
+            _ => None,
+        }
+    }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+/// Longest payload of one stored deflate block.
+const STORED_BLOCK_MAX: usize = 65535;
+
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut c = n as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            c = if c & 1 == 1 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+            bit += 1;
+        }
+        table[n] = c;
+        n += 1;
+    }
+    table
+};
+
+/// The CRC-32 (ISO 3309, as used by PNG) of the concatenation of `parts`.
+pub fn crc32(parts: &[&[u8]]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for part in parts {
+        for byte in *part {
+            crc = CRC_TABLE[((crc ^ u32::from(*byte)) & 0xFF) as usize] ^ (crc >> 8);
+        }
+    }
+    !crc
+}
+
+/// The Adler-32 checksum of `bytes` (the zlib trailer).
+pub fn adler32(bytes: &[u8]) -> u32 {
+    const MODULUS: u32 = 65521;
+    // The largest block for which the sums cannot overflow a u32.
+    const BLOCK: usize = 5552;
+    let (mut a, mut b) = (1u32, 0u32);
+    for block in bytes.chunks(BLOCK) {
+        for byte in block {
+            a += u32::from(*byte);
+            b += a;
+        }
+        a %= MODULUS;
+        b %= MODULUS;
+    }
+    b << 16 | a
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&[kind, data]).to_be_bytes());
 }
 
 /// The 8x8 glyph of `ch`; bit 0 of each row byte is the leftmost pixel.
@@ -427,9 +563,24 @@ pub enum Event {
 pub trait GraphicsBackend {
     /// Opens (or re-opens) the output with a canvas of `width` x `height`.
     fn open(&mut self, width: usize, height: usize, title: &str) -> Result<(), String>;
+    /// Like [`GraphicsBackend::open`], telling the backend how many pixel
+    /// buffers the program uses (`SCREEN w, h, title$, buffers`: 1, or 2 for
+    /// double buffering). The backend only ever receives *published* frames
+    /// through [`GraphicsBackend::present`], so the default just opens.
+    fn open_buffered(
+        &mut self,
+        width: usize,
+        height: usize,
+        title: &str,
+        buffers: usize,
+    ) -> Result<(), String> {
+        let _ = buffers;
+        self.open(width, height, title)
+    }
     /// Closes the output (`SCREEN 0` or the end of the program).
     fn close(&mut self);
-    /// Shows `canvas` (a complete frame).
+    /// Shows `canvas` (a complete frame; in double-buffered mode the buffer
+    /// that was just published by `FLIP`).
     fn present(&mut self, canvas: &Canvas) -> Result<(), String>;
     /// Returns the events that arrived since the previous call, oldest
     /// first, without blocking.
@@ -442,6 +593,15 @@ pub trait GraphicsBackend {
 impl GraphicsBackend for Box<dyn GraphicsBackend> {
     fn open(&mut self, width: usize, height: usize, title: &str) -> Result<(), String> {
         (**self).open(width, height, title)
+    }
+    fn open_buffered(
+        &mut self,
+        width: usize,
+        height: usize,
+        title: &str,
+        buffers: usize,
+    ) -> Result<(), String> {
+        (**self).open_buffered(width, height, title, buffers)
     }
     fn close(&mut self) {
         (**self).close();
@@ -491,7 +651,17 @@ impl<B: GraphicsBackend> AutoClose<B> {
 
 impl<B: GraphicsBackend> GraphicsBackend for AutoClose<B> {
     fn open(&mut self, width: usize, height: usize, title: &str) -> Result<(), String> {
-        self.inner.open(width, height, title)?;
+        self.open_buffered(width, height, title, 1)
+    }
+
+    fn open_buffered(
+        &mut self,
+        width: usize,
+        height: usize,
+        title: &str,
+        buffers: usize,
+    ) -> Result<(), String> {
+        self.inner.open_buffered(width, height, title, buffers)?;
         self.opened_at = Some(std::time::Instant::now());
         self.frames = 0;
         Ok(())
@@ -528,7 +698,13 @@ pub struct HeadlessState {
     pub title: String,
     pub size: (usize, usize),
     pub frames: usize,
+    /// The most recently presented frame: what the display shows.
     pub last_frame: Option<Canvas>,
+    /// The buffer count of the last open (1 or 2).
+    pub buffers: usize,
+    /// The last `history_limit` presented frames, oldest first.
+    pub history: VecDeque<Canvas>,
+    pub history_limit: usize,
     pub slept_ms: u64,
     pub polls: usize,
     /// Events returned (all at once) by the next poll.
@@ -564,8 +740,37 @@ impl HeadlessBackend {
         self.state.borrow().frames
     }
 
+    /// The front frame: the most recently presented one (what a display
+    /// would show now), or `None` before anything was presented.
     pub fn last_frame(&self) -> Option<Canvas> {
         self.state.borrow().last_frame.clone()
+    }
+
+    /// Alias of [`HeadlessBackend::last_frame`] named after double buffering.
+    pub fn front_frame(&self) -> Option<Canvas> {
+        self.last_frame()
+    }
+
+    /// The buffer count given to the latest open (1 unless `SCREEN` asked
+    /// for double buffering).
+    pub fn buffers(&self) -> usize {
+        self.state.borrow().buffers
+    }
+
+    /// Starts keeping copies of the last `limit` presented frames (default
+    /// 0: none, because frames can be large). Retrieve them with
+    /// [`HeadlessBackend::frame_history`].
+    pub fn record_frames(&self, limit: usize) {
+        let mut state = self.state.borrow_mut();
+        state.history_limit = limit;
+        while state.history.len() > limit {
+            state.history.pop_front();
+        }
+    }
+
+    /// The recorded presented frames, oldest first.
+    pub fn frame_history(&self) -> Vec<Canvas> {
+        self.state.borrow().history.iter().cloned().collect()
     }
 
     pub fn is_open(&self) -> bool {
@@ -595,11 +800,22 @@ impl HeadlessBackend {
 
 impl GraphicsBackend for HeadlessBackend {
     fn open(&mut self, width: usize, height: usize, title: &str) -> Result<(), String> {
+        self.open_buffered(width, height, title, 1)
+    }
+
+    fn open_buffered(
+        &mut self,
+        width: usize,
+        height: usize,
+        title: &str,
+        buffers: usize,
+    ) -> Result<(), String> {
         let mut state = self.state.borrow_mut();
         state.is_open = true;
         state.opened += 1;
         state.size = (width, height);
         state.title = title.to_string();
+        state.buffers = buffers;
         Ok(())
     }
 
@@ -611,6 +827,12 @@ impl GraphicsBackend for HeadlessBackend {
         let mut state = self.state.borrow_mut();
         state.frames += 1;
         state.last_frame = Some(canvas.clone());
+        if state.history_limit > 0 {
+            if state.history.len() == state.history_limit {
+                state.history.pop_front();
+            }
+            state.history.push_back(canvas.clone());
+        }
         Ok(())
     }
 
@@ -661,6 +883,41 @@ mod tests {
         assert_eq!(glyph('A')[0], 0x0C);
         assert_eq!(glyph('\u{e9}'), glyph('?'));
         assert_eq!(glyph(' '), &[0; 8]);
+    }
+
+    #[test]
+    fn checksums_match_their_published_check_values() {
+        assert_eq!(crc32(&[b"123456789"]), 0xCBF4_3926);
+        assert_eq!(crc32(&[b"1234", b"56789"]), 0xCBF4_3926);
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+        assert_eq!(adler32(b""), 1);
+        // Long runs of 0xFF exercise the deferred modulo.
+        let long = vec![0xFFu8; 100_000];
+        let (mut a, mut b) = (1u64, 0u64);
+        for byte in &long {
+            a = (a + u64::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        assert_eq!(u64::from(adler32(&long)), b << 16 | a);
+    }
+
+    #[test]
+    fn image_format_follows_the_extension() {
+        use std::path::Path;
+        assert_eq!(
+            ImageFormat::from_path(Path::new("a.PNG")),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            ImageFormat::from_path(Path::new("dir/a.bmp")),
+            Some(ImageFormat::Bmp)
+        );
+        assert_eq!(
+            ImageFormat::from_path(Path::new("a.ppm")),
+            Some(ImageFormat::Ppm)
+        );
+        assert_eq!(ImageFormat::from_path(Path::new("a.gif")), None);
+        assert_eq!(ImageFormat::from_path(Path::new("png")), None);
     }
 
     #[test]

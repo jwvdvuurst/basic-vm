@@ -3,9 +3,9 @@ use crate::value::Value;
 
 pub const INITIAL_HEAP_BYTES: usize = 1024 * 1024;
 const COLLECTION_INTERVAL: usize = 256;
-const VALUE_BYTES: usize = 9;
+pub(crate) const VALUE_BYTES: usize = 9;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ObjectRef(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +138,14 @@ impl Heap {
             .filter(|start| start + VALUE_BYTES <= entry.length)
             .ok_or("record field index out of range")?;
         Ok(entry.offset + start..entry.offset + start + VALUE_BYTES)
+    }
+
+    /// True when allocating `bytes` more would run a collection, i.e. when
+    /// the callers' root lists are actually needed. Lets callers skip the
+    /// (call-depth-proportional) cost of gathering roots on the common path.
+    pub(crate) fn collection_due(&self, bytes: usize) -> bool {
+        self.used.saturating_add(bytes.max(1)) > self.storage.len()
+            || self.allocations_since_gc >= self.gc_interval
     }
 
     /// `extra` holds values (the new payload) that must survive a collection

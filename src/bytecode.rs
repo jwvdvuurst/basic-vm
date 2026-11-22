@@ -192,6 +192,19 @@ pub enum Op {
     /// Raises the error of the CATCH block `depth` TRY blocks below the innermost.
     Rethrow(usize),
     Collect,
+    /// `ASSERT condition [, message$]`: operands are the condition and, when
+    /// `has_message`, the message.
+    Assert {
+        has_message: bool,
+    },
+    /// `ASSERTEQ expected, actual [, message$]`.
+    AssertEq {
+        has_message: bool,
+    },
+    /// `ASSERTNEAR expected, actual, epsilon [, message$]`.
+    AssertNear {
+        has_message: bool,
+    },
     /// `ON KEY|MOUSE|CLOSE CALL f` registers function `f`; `ON ... OFF`
     /// (`function: None` after linking) removes the handler.
     OnEvent {
@@ -199,6 +212,11 @@ pub enum Op {
         function: Option<usize>,
     },
     Halt,
+    /// `END` / `STOP`: halts like `Halt`; a test that executes it is
+    /// reported as an error instead of passing.
+    Terminate {
+        stop: bool,
+    },
 }
 
 /// The kinds of event a handler function can be registered for.
@@ -341,7 +359,7 @@ builtins! {
     Color => "COLOR", 1, 2;
     Locate => "LOCATE", 1, 2;
     Sleep => "SLEEP", 1, 1;
-    Screen => "SCREEN", 1, 3;
+    Screen => "SCREEN", 1, 4;
     Gcls => "GCLS", 0, 1;
     Gcolor => "GCOLOR", 1, 1;
     Pset => "PSET", 2, 3;
@@ -367,6 +385,20 @@ builtins! {
     WindowOpen => "WINDOWOPEN", 0, 0;
     ScreenW => "SCREENW", 0, 0;
     ScreenH => "SCREENH", 0, 0;
+    Width => "WIDTH", 0, 0;
+    Height => "HEIGHT", 0, 0;
+    Center => "CENTER", 0, 0;
+    CenterX => "CENTERX", 0, 0;
+    CenterY => "CENTERY", 0, 0;
+    Inside => "INSIDE", 2, 2;
+    FlipClear => "FLIP CLEAR", 0, 0;
+    Buffer => "BUFFER", 1, 1;
+    CopyBuffer => "COPYBUFFER", 2, 2;
+    ActiveBuffer => "ACTIVEBUFFER", 0, 0;
+    VisibleBuffer => "VISIBLEBUFFER", 0, 0;
+    Buffers => "BUFFERS", 0, 0;
+    Screenshot => "SCREENSHOT", 1, 1;
+    ScreenshotVisible => "SCREENSHOT VISIBLE", 1, 1;
 }
 
 impl Builtin {
@@ -389,6 +421,7 @@ impl Builtin {
                 | CircleFill
                 | DrawText
                 | Flip
+                | FlipClear
                 | Present
                 | DoEvents
                 | Rgb
@@ -404,6 +437,19 @@ impl Builtin {
                 | WindowOpen
                 | ScreenW
                 | ScreenH
+                | Width
+                | Height
+                | Center
+                | CenterX
+                | CenterY
+                | Inside
+                | Buffer
+                | CopyBuffer
+                | ActiveBuffer
+                | VisibleBuffer
+                | Buffers
+                | Screenshot
+                | ScreenshotVisible
         )
     }
 
@@ -426,8 +472,13 @@ impl Builtin {
                 | CircleFill
                 | DrawText
                 | Flip
+                | FlipClear
                 | Present
                 | DoEvents
+                | Buffer
+                | CopyBuffer
+                | Screenshot
+                | ScreenshotVisible
         ) || matches!(
             self,
             Self::Insert
@@ -532,6 +583,41 @@ pub struct Program {
     pub(crate) types: Vec<RecordType>,
     /// Display paths of the source files; entry 0 (the main program) is empty.
     pub(crate) files: Vec<String>,
+    /// `TEST` blocks of all files, ordered by file (main program first, then
+    /// imported modules in import order) and source line.
+    pub(crate) tests: Vec<TestCase>,
+    /// Instruction index where the main program's own code begins; everything
+    /// before it is the top-level initialisation of imported modules.
+    pub(crate) main_start: usize,
+    /// Instruction ranges of the main program's top-level `CONST` and `DIM`
+    /// statements, executed before each test of the main program.
+    pub(crate) prelude: Vec<std::ops::Range<usize>>,
+}
+
+/// A `TEST` block, compiled as a hidden function of its file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestCase {
+    /// The test name as written in the source.
+    pub name: String,
+    /// The module alias as written in the importing file (with a `#n` suffix
+    /// for repeated imports); empty for tests of the main program.
+    pub module: String,
+    /// Index into `Program::files()`; 0 is the main program.
+    pub file: usize,
+    /// Line of the `TEST` statement.
+    pub line: usize,
+    pub(crate) function: usize,
+}
+
+impl TestCase {
+    /// The reported name: `name`, or `Module.name` for a module's tests.
+    pub fn full_name(&self) -> String {
+        if self.module.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}.{}", self.module, self.name)
+        }
+    }
 }
 
 /// A literal default of a record field (`field AS INTEGER = 3`).
@@ -612,5 +698,10 @@ impl Program {
     /// The record type table (`TYPE ... END TYPE` declarations).
     pub fn types(&self) -> &[RecordType] {
         &self.types
+    }
+
+    /// The `TEST` blocks of the program and its imported modules.
+    pub fn tests(&self) -> &[TestCase] {
+        &self.tests
     }
 }

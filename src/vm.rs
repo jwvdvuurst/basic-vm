@@ -4,22 +4,30 @@ use std::io::{BufRead, Write};
 use std::time::Instant;
 
 use crate::files::{FileTable, MAX_FILES};
-use crate::heap::{Heap, HeapStats, ObjectRef};
+use crate::heap::{Heap, HeapStats, ObjectRef, VALUE_BYTES};
 use crate::stdlib::SplitMix64;
 use crate::value::{Value, cmp_numeric, float_to_int};
 use crate::{
     BinaryOp, CallBinding, CollectionKind, Error, FieldDefault, Op, Place, Program, VarType,
 };
 
+mod assertions;
 mod builtins;
 mod media;
+mod testing;
 
+use testing::TestState;
 /// Largest number of elements a `DIM`/`REDIM` may allocate (counting every
 /// nesting level of a multi-dimensional array).
 const MAX_ARRAY_ELEMENTS: usize = 16 * 1024 * 1024;
 /// Upper bound on the array objects (the array plus all its rows) one DIM or
 /// REDIM may allocate.
 const MAX_ARRAY_OBJECTS: usize = 1024 * 1024;
+/// Deepest nesting of active function, method, constructor and event-handler
+/// calls. Reaching it raises an ordinary, catchable runtime error, which is
+/// how a function that calls itself without an end is reported instead of
+/// exhausting memory.
+pub const MAX_CALL_DEPTH: usize = 25_000;
 
 #[derive(Clone)]
 enum LoopState {
@@ -89,6 +97,8 @@ struct Fault {
     file: usize,
     function: Option<String>,
     message: String,
+    /// Raised by a failed `ASSERT*` statement.
+    assertion: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,9 +140,14 @@ pub struct Vm {
     handlers: Vec<Handler>,
     /// Set by a rethrow so the original line and function are preserved.
     error_origin: Option<(usize, usize, Option<String>)>,
+    /// Set while an assertion failure (or a rethrown one) propagates out of
+    /// `execute`; consumed when the fault is created.
+    assertion_failure: bool,
     files: FileTable,
     rng: SplitMix64,
     started: Instant,
+    /// Test mode (see `testing.rs`): `SLEEP` does not wait.
+    test: TestState,
     arguments: Vec<String>,
     media: media::Media,
 }
@@ -150,9 +165,11 @@ impl Vm {
             frames: Vec::new(),
             handlers: Vec::new(),
             error_origin: None,
+            assertion_failure: false,
             files: FileTable::default(),
             rng: SplitMix64::new(SplitMix64::DEFAULT_SEED),
             started: Instant::now(),
+            test: TestState::default(),
             arguments: Vec::new(),
             media: media::Media::default(),
         })
@@ -170,7 +187,7 @@ impl Vm {
     /// Runs the program. Every open file is flushed and closed before this
     /// returns, whether the program finished, halted or failed.
     pub fn run(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<(), Error> {
-        let result = self.run_instructions(input, output);
+        let result = self.run_instructions(input, output, usize::MAX);
         let media = self.finish_media(output);
         let closed = self.files.close_all();
         result?;
@@ -178,18 +195,24 @@ impl Vm {
         closed.map_err(|message| Error::new(self.current_line(), message))
     }
 
+    /// Executes instructions from the current position until the program
+    /// halts, runs off its end or reaches `limit`.
     fn run_instructions(
         &mut self,
         input: &mut impl BufRead,
         output: &mut impl Write,
+        limit: usize,
     ) -> Result<(), Error> {
-        while let Some(instruction) = self.program.instructions.get(self.pc) {
+        while self.pc < limit
+            && let Some(instruction) = self.program.instructions.get(self.pc)
+        {
             let line = instruction.line;
             let file = instruction.file;
             let op = instruction.op.clone();
             self.pc += 1;
             if let Err(message) = self.execute(op, input, output) {
                 self.media.cancel_dispatch();
+                let assertion = std::mem::take(&mut self.assertion_failure);
                 let (line, file, function) = self
                     .error_origin
                     .take()
@@ -199,6 +222,7 @@ impl Vm {
                     file,
                     function,
                     message,
+                    assertion,
                 })
                 .map_err(|fault| Error {
                     line: fault.line,
@@ -207,6 +231,7 @@ impl Vm {
                     file: Some(self.program.file_name(fault.file))
                         .filter(|name| !name.is_empty())
                         .map(str::to_string),
+                    assertion: fault.assertion,
                 })?;
             }
         }
@@ -335,8 +360,25 @@ impl Vm {
             .collect()
     }
 
+    /// The roots to hand to a single heap allocation of `bytes` bytes: all of
+    /// them when the allocation will collect garbage, none otherwise (the heap
+    /// only reads them when it collects). Gathering roots walks every call
+    /// frame, so skipping it keeps deep recursion that allocates linear.
+    fn roots_for(&self, bytes: usize) -> Vec<ObjectRef> {
+        if self.heap.collection_due(bytes) {
+            self.roots()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// [`Vm::roots_for`] for a payload of `values` values.
+    fn roots_for_values(&self, values: usize) -> Vec<ObjectRef> {
+        self.roots_for(values.saturating_mul(VALUE_BYTES))
+    }
+
     fn allocate(&mut self, text: &str) -> Result<Value, String> {
-        let roots = self.roots();
+        let roots = self.roots_for(text.len());
         self.heap.allocate(text, &roots).map(Value::String)
     }
 
@@ -490,7 +532,7 @@ impl Vm {
                     VarType::Map => CollectionKind::Map,
                     _ => CollectionKind::Array,
                 };
-                let reference = self.heap.new_collection(kind, &[], &self.roots())?;
+                let reference = self.heap.new_collection(kind, &[], &self.roots_for(0))?;
                 Value::Collection(reference)
             }
         })
@@ -523,7 +565,11 @@ impl Vm {
             extra.extend(value.reference());
             values.push(value);
         }
-        let roots: Vec<ObjectRef> = self.roots().into_iter().chain(extra).collect();
+        let roots = if self.heap.collection_due(values.len() * VALUE_BYTES) {
+            self.roots().into_iter().chain(extra).collect()
+        } else {
+            Vec::new()
+        };
         let reference = self.heap.new_record(ty, &values, &roots)?;
         Ok(Value::Record(reference))
     }
@@ -535,18 +581,22 @@ impl Vm {
         label: &str,
         extra: &[ObjectRef],
     ) -> Result<Value, String> {
-        let roots = || -> Vec<ObjectRef> {
-            self.roots()
-                .into_iter()
-                .chain(extra.iter().copied())
-                .collect()
+        let roots = |bytes: usize| -> Vec<ObjectRef> {
+            if self.heap.collection_due(bytes) {
+                self.roots()
+                    .into_iter()
+                    .chain(extra.iter().copied())
+                    .collect()
+            } else {
+                Vec::new()
+            }
         };
         let value = match default {
             Some(FieldDefault::Number(n)) => Value::Number(n),
             Some(FieldDefault::Int(n)) => Value::Int(n),
             Some(FieldDefault::Nothing) => Value::Nothing,
             Some(FieldDefault::Text(text)) => {
-                let roots = roots();
+                let roots = roots(text.len());
                 Value::String(self.heap.allocate(&text, &roots)?)
             }
             Some(FieldDefault::Constant(constant)) => {
@@ -562,7 +612,7 @@ impl Vm {
                 VarType::Double | VarType::Boolean | VarType::Variant => Value::Number(0.0),
                 VarType::Record(_) => Value::Nothing,
                 VarType::String => {
-                    let roots = roots();
+                    let roots = roots(0);
                     Value::String(self.heap.allocate("", &roots)?)
                 }
                 VarType::List | VarType::Map | VarType::Array => {
@@ -571,7 +621,7 @@ impl Vm {
                         VarType::Map => CollectionKind::Map,
                         _ => CollectionKind::Array,
                     };
-                    let roots = roots();
+                    let roots = roots(0);
                     Value::Collection(self.heap.new_collection(kind, &[], &roots)?)
                 }
             },
@@ -769,6 +819,17 @@ impl Vm {
         discard_result: bool,
         binding: Option<&CallBinding>,
     ) -> Result<(), String> {
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            let name = self
+                .program
+                .functions
+                .get(function)
+                .map_or("?", |definition| definition.qualified.as_str());
+            return Err(format!(
+                "call depth limit exceeded ({MAX_CALL_DEPTH} frames) calling {name}; \
+                 is a function calling itself without end?"
+            ));
+        }
         let extra_operands: usize =
             binding.map_or(0, |b| b.refs.iter().map(|r| r.place.operands()).sum());
         let start = self
@@ -947,7 +1008,7 @@ impl Vm {
             values.push(value);
         }
         self.heap
-            .replace_collection(reference, &values, &self.roots())
+            .replace_collection(reference, &values, &self.roots_for_values(values.len()))
     }
 
     fn return_from_function(&mut self) -> Result<(), String> {
@@ -1118,7 +1179,11 @@ impl Vm {
                 if kind == CollectionKind::Map {
                     values = self.map_pairs(&values)?;
                 }
-                let reference = self.heap.new_collection(kind, &values, &self.roots())?;
+                let reference = self.heap.new_collection(
+                    kind,
+                    &values,
+                    &self.roots_for_values(values.len()),
+                )?;
                 self.stack.push(Value::Collection(reference));
             }
             Op::IndexGet => {
@@ -1178,8 +1243,11 @@ impl Vm {
                     return Err("APPEND requires a list".into());
                 }
                 values.push(value);
-                self.heap
-                    .replace_collection(reference, &values, &self.roots())?;
+                self.heap.replace_collection(
+                    reference,
+                    &values,
+                    &self.roots_for_values(values.len()),
+                )?;
             }
             Op::Remove => {
                 let index = self.pop()?;
@@ -1196,8 +1264,11 @@ impl Vm {
                 } else {
                     values.remove(position);
                 }
-                self.heap
-                    .replace_collection(reference, &values, &self.roots())?;
+                self.heap.replace_collection(
+                    reference,
+                    &values,
+                    &self.roots_for_values(values.len()),
+                )?;
             }
             Op::ForStart { variable, end } => {
                 let step_value = self.pop()?;
@@ -1272,9 +1343,11 @@ impl Vm {
                 let start = self.pc - 1;
                 self.loops.remove(&start);
                 if let Some(first) = values.first().copied() {
-                    let snapshot =
-                        self.heap
-                            .new_collection(CollectionKind::List, &values, &self.roots())?;
+                    let snapshot = self.heap.new_collection(
+                        CollectionKind::List,
+                        &values,
+                        &self.roots_for_values(values.len()),
+                    )?;
                     self.store(variable.clone(), first)?;
                     if let Some(second) = &value_variable {
                         self.store(second.clone(), values[1])?;
@@ -1415,6 +1488,7 @@ impl Vm {
                     Pending::Leave { target, tries } => self.leave(target, tries)?,
                     Pending::Raise(fault) => {
                         self.error_origin = Some((fault.line, fault.file, fault.function));
+                        self.assertion_failure = fault.assertion;
                         return Err(fault.message);
                     }
                 }
@@ -1433,20 +1507,43 @@ impl Vm {
                     .and_then(|index| self.handlers[index].error.clone())
                     .ok_or("THROW without a message needs an active CATCH block")?;
                 self.error_origin = Some((fault.line, fault.file, fault.function));
+                self.assertion_failure = fault.assertion;
                 return Err(fault.message);
             }
             Op::Collect => self.heap.collect(&self.roots())?,
+            Op::Assert { has_message } => self.assert_op(has_message)?,
+            Op::AssertEq { has_message } => self.assert_eq_op(has_message)?,
+            Op::AssertNear { has_message } => self.assert_near_op(has_message)?,
             Op::OnEvent { kind, function } => self.register_handler(kind, function),
-            Op::Halt => {
-                self.media.cancel_dispatch();
-                self.loops.clear();
-                self.frames.clear();
-                self.stack.clear();
-                self.handlers.clear();
-                self.pc = self.program.instructions.len();
+            Op::Halt => self.halt(),
+            Op::Terminate { stop } => {
+                if self.test.running && self.test.halted.is_none() {
+                    let (line, file) = self
+                        .program
+                        .instructions
+                        .get(self.pc.saturating_sub(1))
+                        .map_or((0, 0), |instruction| (instruction.line, instruction.file));
+                    self.test.halted = Some(testing::Halted {
+                        keyword: if stop { "STOP" } else { "END" },
+                        line,
+                        file,
+                        function: self.function_name(),
+                    });
+                }
+                self.halt();
             }
         }
         Ok(())
+    }
+
+    /// Stops the program: drops every call, loop, handler and operand.
+    fn halt(&mut self) {
+        self.media.cancel_dispatch();
+        self.loops.clear();
+        self.frames.clear();
+        self.stack.clear();
+        self.handlers.clear();
+        self.pc = self.program.instructions.len();
     }
 
     /// Pops the value to print and renders it.

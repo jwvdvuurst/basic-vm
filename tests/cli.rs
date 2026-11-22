@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+mod common;
+
 #[test]
 fn runs_collection_example_and_dumps_bytecode() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -322,12 +324,77 @@ fn graphics_example_writes_screenshots_headless() {
 fn bad_screenshot_extension_fails() {
     let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/graphics.bas");
     let output = Command::new(env!("CARGO_BIN_EXE_basic-vm"))
-        .args(["--screenshot", "out.png"])
+        .args(["--screenshot", "out.gif"])
         .arg(&program)
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(".ppm"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(".ppm, .bmp or .png"), "{stderr}");
+    assert!(!Path::new("out.gif").exists());
+}
+
+#[test]
+fn cli_screenshot_accepts_png() {
+    let dir = common::TempDir::new("cli-png");
+    let output = Command::new(env!("CARGO_BIN_EXE_basic-vm"))
+        .args(["--headless-graphics", "--screenshot"])
+        .arg(dir.file("scene.png"))
+        .arg(common::examples("graphics.bas"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let png = common::decode_file(&dir.file("scene.png"));
+    assert_eq!((png.width, png.height), (160, 120));
+    assert_eq!(png.at(80, 80), 0xFF00FF);
+    assert_eq!(png.at(0, 0), 0x000040);
+    // Same pixels as the PPM written for the same run.
+    let ppm_output = Command::new(env!("CARGO_BIN_EXE_basic-vm"))
+        .arg("--screenshot")
+        .arg(dir.file("scene.PPM"))
+        .arg(common::examples("graphics.bas"))
+        .output()
+        .unwrap();
+    assert!(ppm_output.status.success());
+    assert_eq!(png, common::decode_file(&dir.file("scene.PPM")));
+}
+
+#[test]
+fn animation_example_ends_on_the_last_flipped_frame() {
+    let dir = common::TempDir::new("cli-animation");
+    let output = Command::new(env!("CARGO_BIN_EXE_basic-vm"))
+        .args(["--headless-graphics", "--screenshot"])
+        .arg(dir.file("last.png"))
+        .arg(common::examples("animation.bas"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Animation done\n"
+    );
+    let last = common::decode_file(&dir.file("last.png"));
+    assert_eq!((last.width, last.height), (160, 120));
+    // Frame 60: the ball (frame index 59) is at (128, 99), and nothing of the
+    // earlier positions remains because every frame starts with GCLS.
+    assert_eq!(last.at(128, 99), 0xFFFF55);
+    assert_eq!(last.at(10, 40), 0x0000AA);
+    assert_eq!(last.at(69, 69), 0x0000AA);
+    assert_eq!(last.at(80, 115), 0x00AA00);
+    // The frame counter text is drawn near the top-left corner.
+    let text_pixels = (0..8)
+        .flat_map(|y| (4..4 + 8 * 8).map(move |x| (x, y + 4)))
+        .filter(|(x, y)| last.at(*x, *y) == 0xFFFFFF)
+        .count();
+    assert!(text_pixels > 20, "{text_pixels}");
 }
 
 fn test_dir(name: &str) -> std::path::PathBuf {

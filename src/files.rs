@@ -148,6 +148,11 @@ impl FileTable {
         first.map_or(Ok(()), Err)
     }
 
+    /// The numbers of the open files, ascending.
+    pub(crate) fn open_numbers(&self) -> Vec<usize> {
+        self.files.keys().copied().collect()
+    }
+
     /// The number a path is currently open under, if any.
     pub(crate) fn open_as(&self, path: &Path) -> Option<usize> {
         let canonical = std::fs::canonicalize(path).ok()?;

@@ -3,15 +3,17 @@
 A personal implementation of extended BASIC, compiled to bytecode and executed
 by a standalone Rust virtual machine (not the JVM).
 
-Version 0.3.0 covers six feature areas: (1) core BASIC with collections,
+Version 0.4.0 covers seven feature areas: (1) core BASIC with collections,
 loops, functions, typed values, a standard library and a tracing garbage
 collector; (2) file I/O and structured errors; (3) records; (4) objects
 (`CLASS`); (5) modules, named/optional parameters; (6) console control,
-software-rendered graphics and events, with a desktop window backend.
+software-rendered graphics and events, with a desktop window backend; (7)
+built-in unit testing (`TEST` blocks, `ASSERT*` statements, `basic-vm --test`).
 
 Examples: `control`, `stdlib`, `fileio`, `types`, `records`, `modules`,
-`objects`, `complex` (a `Complex` class library in `examples/lib/complexutil.bas`),
-`graphics` and `paint` (plus `collections`, `functions`, `hello`,
+`objects`, `complex` (a `Complex` class library in `examples/lib/complexutil.bas`,
+with its own unit tests), `testing` (unit tests),
+`graphics`, `paint` and `animation` (double-buffered animation) (plus `collections`, `functions`, `hello`,
 `input`, `primes`) in `examples/`.
 
 <!-- ai-hub:start -->
@@ -43,7 +45,11 @@ cargo run -- examples\hello.bas
 cargo run -- examples\input.bas
 cargo run -- examples\stdlib.bas extra arguments
 cargo run -- --dump-bytecode examples\hello.bas
+cargo run -- --test examples\testing.bas
+cargo run -- --test examples\lib\complexutil.bas
+cargo run -- --test --test-imports examples\complex.bas
 cargo run -- --headless-graphics --screenshot scene.ppm examples\graphics.bas
+cargo run -- --headless-graphics --screenshot frame.png examples\animation.bas
 cargo build --release
 .\target\release\basic-vm.exe examples\collections.bas
 ```
@@ -67,7 +73,8 @@ window (minifb, the default `window` Cargo feature; `--no-default-features`
 builds without it). CLI flags, before the program path:
 
 - `--headless-graphics`: draw to an in-memory canvas instead of a window.
-- `--screenshot file.ppm|file.bmp`: implies headless and saves the last frame.
+- `--screenshot file.ppm|file.bmp|file.png`: implies headless and saves the last
+  presented frame.
 - `--auto-close-ms <n>` / `--max-frames <n>`: close the screen after n
   milliseconds / presented frames (bounded runs, e.g. `examples\paint.bas`).
 - `--dump-bytecode`: print the instruction stream instead of running.
@@ -75,8 +82,16 @@ builds without it). CLI flags, before the program path:
 Colours below 16 are palette indexes, so `RGB(0, 0, n)` with `n < 16` is
 drawn as the palette colour.
 
+Double buffering: `SCREEN 160, 120, "Anim", 2` draws into a hidden back buffer
+and only `FLIP` shows it (`BUFFER`, `COPYBUFFER`, `ACTIVEBUFFER()`,
+`VISIBLEBUFFER()`, `BUFFERS()`, `FLIP CLEAR`). `SCREENSHOT "file.png" [, VISIBLE]`
+saves a buffer from BASIC code as `.ppm`, `.bmp` or `.png`. Geometry helpers:
+`WIDTH()`, `HEIGHT()`, `CENTERX()`, `CENTERY()`, `CENTER()` (a `[x, y]` list)
+and `INSIDE(x, y)` (is the pixel on the screen?).
+
 ```powershell
 cargo run -- --auto-close-ms 800 examples\paint.bas
+cargo run -- --auto-close-ms 2000 examples\animation.bas
 ```
 
 ### Implemented language
@@ -167,6 +182,12 @@ examples and current limitations.
   importer, report errors as `path:line:`. Library entry points: `compile`,
   `compile_from(source, path)`, `compile_file(path)`. See
   [Modules](docs/statements.md#modules-import) and `examples/modules.bas`.
+- Unit testing: top-level `TEST name` ... `END TEST` blocks (skipped in normal
+  runs; `EXIT TEST` passes early) and `ASSERT cond [, msg$]`,
+  `ASSERTEQ expected, actual [, msg$]` (deep equality), `ASSERTNEAR expected,
+  actual, eps [, msg$]`; failures are catchable errors. See
+  [Unit testing](#unit-testing-cli) and the
+  [reference](docs/statements.md#unit-testing).
 
 ```basic
 NAME$ = "BASIC"
@@ -181,6 +202,30 @@ END
 Errors include the physical source line and the CLI exits unsuccessfully.
 Programs run until they halt or reach the end; infinite loops are not
 automatically interrupted.
+
+### Unit testing CLI
+
+```powershell
+cargo run -- --test examples\testing.bas
+cargo run -- --test --test-filter clamp examples\testing.bas
+cargo run -- --test --test-imports examples\complex.bas
+```
+
+`--test` (alias `--run-tests`) runs the program file's tests instead of the
+program (the main body is not executed); each test runs on a fresh VM with
+headless graphics, empty stdin and captured output (capped at 64 KiB per test);
+`SLEEP` does not wait. A function that recurses without end stops with a
+catchable `call depth limit exceeded (25000 frames)` error, in tests and normal
+runs alike. Options, before the path:
+`--test-filter text` (case-insensitive name match) and `--test-imports` (also
+run tests of imported modules, reported as `Alias.name`). Output is one
+`PASS name` / `FAIL name: message (file:line)` / `ERROR name: message (file:line)`
+line per test, printed as each test finishes, and a summary `N tests: P passed, F failed, E errors`. Exit code
+`0` when at least one test ran and all passed, `1` on failures, errors, compile
+errors or `no tests found`, `2` for command-line misuse (for example combining
+`--test` with `--screenshot` or `--dump-bytecode`). `END`/`STOP` inside a test is an
+`ERROR`; use `EXIT TEST`. There is no per-test timeout. The library API is
+`run_tests(&program, &TestOptions)` (or `run_tests_with` to stream results).
 
 ### VM and memory
 
