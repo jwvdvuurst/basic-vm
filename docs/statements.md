@@ -76,6 +76,28 @@ INPUT X
 number; string input preserves spaces but removes the line ending.
 Invalid input or end-of-input produces an error.
 
+An interactive program that must survive a closed stdin catches that error and
+reads whole lines as strings, parsing them itself (a numeric `INPUT` would also
+fail on bad text). A prompt printed with a trailing `;` is flushed before
+`INPUT` waits. The games in `examples/games/` use this pattern:
+
+```basic
+FUNCTION ReadLine$(PARAMETER prompt$ AS STRING) AS STRING
+  LOCAL line$ AS STRING
+  line$ = ""
+  PRINT prompt$;
+  TRY
+    INPUT line$
+  CATCH problem$
+    gEof = 1          ' global flag: the input has ended
+  END TRY
+  ReadLine$ = line$
+FEND
+```
+
+(`--test` re-runs only top-level `CONST` and `DIM` statements before each test,
+so globals that functions use, like `gEof`, must be declared with `DIM`.)
+
 ### Expressions and conditions
 
 - Arithmetic: `+`, `-`, `*`, `/`, `^`, `MOD`, unary `+` and `-`, and parentheses.

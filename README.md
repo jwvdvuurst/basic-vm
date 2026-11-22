@@ -14,7 +14,8 @@ Examples: `control`, `stdlib`, `fileio`, `types`, `records`, `modules`,
 `objects`, `complex` (a `Complex` class library in `examples/lib/complexutil.bas`,
 with its own unit tests), `testing` (unit tests),
 `graphics`, `paint` and `animation` (double-buffered animation) (plus `collections`, `functions`, `hello`,
-`input`, `primes`) in `examples/`.
+`input`, `primes`) in `examples/`, and the five text games in `examples/games/`
+(see [Games](#games)).
 
 <!-- ai-hub:start -->
 ## Shared AI guidance
@@ -43,7 +44,7 @@ cargo run -- examples\fileio.bas
 cargo run -- examples\functions.bas
 cargo run -- examples\hello.bas
 cargo run -- examples\input.bas
-cargo run -- examples\stdlib.bas extra arguments
+cargo run -- examples\games\wumpus.bas 42cargo run -- examples\stdlib.bas extra arguments
 cargo run -- --dump-bytecode examples\hello.bas
 cargo run -- --test examples\testing.bas
 cargo run -- --test examples\lib\complexutil.bas
@@ -226,6 +227,43 @@ errors or `no tests found`, `2` for command-line misuse (for example combining
 `--test` with `--screenshot` or `--dump-bytecode`). `END`/`STOP` inside a test is an
 `ERROR`; use `EXIT TEST`. There is no per-test timeout. The library API is
 `run_tests(&program, &TestOptions)` (or `run_tests_with` to stream results).
+
+### Games
+
+Five complete text games live in `examples/games/`. They are independent,
+clean-room implementations of well-known public game concepts (the rules are
+common knowledge; no original listing was used - each file header credits the
+concept's origin). They show the idioms of the dialect: `OPTION EXPLICIT`, pure
+game logic in `FUNCTION`s kept apart from input/output, `TRY`/`CATCH` around
+`INPUT` so the end of the input ends the game gracefully, and a `TEST` suite
+per game.
+
+```powershell
+basic-vm examples\games\hamurabi.bas [seed]
+basic-vm examples\games\wumpus.bas [seed] [reveal]
+basic-vm examples\games\lander.bas [seed]
+basic-vm examples\games\hangman.bas [seed]
+basic-vm examples\games\mastermind.bas [seed] [distinct]
+basic-vm --test examples\games\wumpus.bas        # likewise for the others
+```
+
+(With Cargo: `cargo run -- examples\games\wumpus.bas 42`.) The optional
+numeric argument seeds the random generator, so a game can be replayed or
+scripted; without it the clock is used and the seed is printed at the start.
+Every game also stops cleanly (exit code 0, no error) when its input ends, so
+they can be driven from a pipe: `"M 2","Q" | basic-vm examples\games\wumpus.bas 42`.
+
+| Game | Controls | Tests |
+| --- | --- | --- |
+| `hamurabi.bas` - rule a city for ten years: 100 people, 2800 bushels, 1000 acres. | Each year enter acres to buy (negative sells), bushels to feed (20 per person) and acres to plant; amounts you do not have are refused with a message. Famine over 45% in a year ends your reign; a final rating follows year ten. | 11 |
+| `wumpus.bas` - hunt the wumpus in a 20-room dodecahedron cave with two pits and two bat colonies; five arrows. | `M room` (or just a room number) walks, `S r1 r2 ...` shoots an arrow through up to five rooms (it strays if the next room is not connected), `H` help, `Q` quit. The extra argument `reveal` prints the hazard positions (a debugging aid). | 12 |
+| `lander.bas` - land a module on the Moon: each 10 s turn choose a fuel burn rate. | Type a burn rate in kg/s (0 up to the limit shown); touch down at 3 m/s or less to walk away, 1 m/s or less is perfect. With the tank empty the lander free-falls. `y`/`n` flies again. | 12 |
+| `hangman.bas` - guess a word (42 built in) before the gallows is complete. | Type a letter, or the whole word; repeated or invalid guesses are explained and cost nothing. Six misses lose. `y`/`n` plays again. | 10 |
+| `mastermind.bas` - crack a hidden code of 4 letters from A-F in 10 attempts. | Type four letters (spaces optional); the reply counts `exact` and `misplaced` pegs. `Q` gives up. The extra argument `distinct` forbids repeated letters in the code. `y`/`n` plays again. | 10 |
+
+`cargo test --test games` drives every game through the built binary with a
+fixed seed and scripted input (with a 20-second watchdog) and runs each game's
+`--test` suite.
 
 ### VM and memory
 
