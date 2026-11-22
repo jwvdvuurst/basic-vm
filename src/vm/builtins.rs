@@ -159,6 +159,8 @@ impl Vm {
             | Builtin::Fix
             | Builtin::Sin
             | Builtin::Cos
+            | Builtin::Tan
+            | Builtin::Atn
             | Builtin::Log
             | Builtin::Exp => {
                 let x = num(args[0], who)?;
@@ -172,6 +174,8 @@ impl Vm {
                     Builtin::Fix => x.trunc(),
                     Builtin::Sin => x.sin(),
                     Builtin::Cos => x.cos(),
+                    Builtin::Tan => x.tan(),
+                    Builtin::Atn => x.atan(),
                     Builtin::Log if x <= 0.0 => {
                         return Err("LOG: argument must be greater than zero".into());
                     }
@@ -180,6 +184,14 @@ impl Vm {
                 };
                 finite(who, result)?
             }
+            Builtin::Atn2 => {
+                // `+ 0.0` turns -0 into 0, so ATN2(0, 0) and ATN2(0, -0) are
+                // both 0 and the result is always in (-pi, pi].
+                let y = num(args[0], who)? + 0.0;
+                let x = num(args[1], who)? + 0.0;
+                finite(who, y.atan2(x))?
+            }
+            Builtin::Pi => Value::Number(std::f64::consts::PI),
             Builtin::Min | Builtin::Max => {
                 num(args[0], who)?;
                 let mut best = args[0];

@@ -10,7 +10,8 @@ collector; (2) file I/O and structured errors; (3) records; (4) objects
 software-rendered graphics and events, with a desktop window backend.
 
 Examples: `control`, `stdlib`, `fileio`, `types`, `records`, `modules`,
-`objects`, `graphics` and `paint` (plus `collections`, `functions`, `hello`,
+`objects`, `complex` (a `Complex` class library in `examples/lib/complexutil.bas`),
+`graphics` and `paint` (plus `collections`, `functions`, `hello`,
 `input`, `primes`) in `examples/`.
 
 <!-- ai-hub:start -->
@@ -34,6 +35,7 @@ Windows, use the Visual Studio C++ build tools.
 
 ```powershell
 cargo run -- examples\collections.bas
+cargo run -- examples\complex.bas
 cargo run -- examples\control.bas
 cargo run -- examples\fileio.bas
 cargo run -- examples\functions.bas
@@ -123,7 +125,7 @@ examples and current limitations.
 - `APPEND L, value`, `REMOVE L, index`, `REMOVE M, key`, and `LEN(collection)`
   provide collection operations. `LEN(string)` counts Unicode characters.
 - A standard library of math (`ABS`, `SQRT`, `MIN`, `MAX`, `ROUND`, `INT`, `FIX`,
-  `SIN`, `COS`, `LOG`, `EXP`, `^`, `RND`/`RANDOMIZE`), string (`LEFT$`, `RIGHT$`,
+  `SIN`, `COS`, `TAN`, `ATN`, `ATN2`, `PI`, `LOG`, `EXP`, `^`, `RND`/`RANDOMIZE`), string (`LEFT$`, `RIGHT$`,
   `MID$`, `INSTR`, `REPLACE$`, `TRIM$`, `UCASE$`, `LCASE$`, `STR$`, `VAL`,
   `SPLIT`, `JOIN$`), collection (`INSERT`, `POP`, `SORT`, `REVERSE`, `CONTAINS`,
   `KEYS`, `VALUES`, `HASKEY`) and utility (`TIMER`, `UNIXTIME`, `DATE$`, `TIME$`,

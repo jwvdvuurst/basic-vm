@@ -268,6 +268,10 @@ builtins! {
     Cos => "COS", 1, 1;
     Log => "LOG", 1, 1;
     Exp => "EXP", 1, 1;
+    Tan => "TAN", 1, 1;
+    Atn => "ATN", 1, 1;
+    Atn2 => "ATN2", 2, 2;
+    Pi => "PI", 0, 0;
     Rnd => "RND", 0, 0;
     Left => "LEFT$", 2, 2;
     Right => "RIGHT$", 2, 2;

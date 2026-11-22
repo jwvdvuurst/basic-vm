@@ -371,6 +371,10 @@ compile time; types and values at run time. All results are finite numbers
 | `ROUND(x [, digits])` | Round half away from zero to `digits` decimals (default 0; negative rounds to tens, hundreds, ...; whole number from -308 to 308). Uses binary floating point, so `ROUND(1.005, 2)` is `1`. |
 | `INT(x)` / `FIX(x)` | Floor (`INT(-2.5)` is `-3`) / truncate toward zero (`FIX(-2.5)` is `-2`). |
 | `SIN(x)`, `COS(x)` | Radians. |
+| `TAN(x)` | Tangent, radians. A non-finite result is an error. |
+| `ATN(x)` | Arc tangent in radians, in `(-pi/2, pi/2)`. |
+| `ATN2(y, x)` | Angle of the point `(x, y)` in radians, in `(-pi, pi]`; **`y` comes first**. `ATN2(0, 0)` is `0` (negative zeros count as `0`, so `ATN2(0, -1)` is `pi` and never `-pi`). |
+| `PI()` | The constant pi (`3.141592653589793`). Needs the parentheses like other zero-argument builtins, so a variable named `PI` still works. |
 | `LOG(x)`, `EXP(x)` | Natural logarithm (`x <= 0` is an error) and `e^x`. |
 | `a ^ b` | Power; see precedence above. `0 ^ 0` is `1`. A negative base with a fractional exponent, `0 ^ negative`, or overflow is an error. |
 | `RND()` | Pseudo-random number with `0 <= x < 1`. |
@@ -756,6 +760,10 @@ CALL a.Reset()            ' statement form (parentheses optional)
 - **Diagnostics** name methods `Class.Method` (`in function ACCOUNT.DEPOSIT`).
 - Not supported: `PRIVATE`/`PUBLIC`, inheritance, interfaces, overloading, bare field
   access, nested CLASS declarations. See `examples/objects.bas`.
+- Worked example: `examples/lib/complexutil.bas` is a `Complex` class library
+  (immutable value objects, module-level factory functions because there are no
+  static methods, `THROW` for domain errors; string-returning methods end in `$`,
+  e.g. `ToString$()`), used by `examples/complex.bas`.
 
 ## Parameter passing, optional and named arguments
 

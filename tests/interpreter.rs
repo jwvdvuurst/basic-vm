@@ -927,6 +927,64 @@ fn math_domain_and_range_errors_are_explicit() {
 }
 
 #[test]
+fn trigonometric_builtins_pi_atn_atn2_and_tan() {
+    let source = "\
+        PRINT ABS(PI() - 3.141592653589793) < 1E-15\n\
+        PRINT ABS(ATN(1) * 4 - PI()) < 1E-12\n\
+        PRINT ABS(ATN2(1, 1) - PI() / 4) < 1E-12\n\
+        PRINT ABS(ATN2(1, -1) - 3 * PI() / 4) < 1E-12\n\
+        PRINT ABS(ATN2(-1, -1) + 3 * PI() / 4) < 1E-12\n\
+        PRINT ABS(ATN2(-1, 1) + PI() / 4) < 1E-12\n\
+        PRINT ABS(ATN2(0, -1) - PI()) < 1E-15\n\
+        PRINT ABS(ATN2(1, 0) - PI() / 2) < 1E-15\n\
+        PRINT ABS(ATN2(-1, 0) + PI() / 2) < 1E-15\n\
+        PRINT ATN2(0, 1); \" \"; ATN2(0, 0); \" \"; ATN(0); \" \"; TAN(0)\n\
+        PRINT ABS(TAN(PI() / 4) - 1) < 1E-12\n\
+        PRINT ABS(TAN(-PI() / 4) + 1) < 1E-12\n\
+        PRINT ROUND(ATN(1000000), 6); \" \"; ROUND(TAN(1), 6)\n\
+        PRINT ATN2(-0, -0); \" \"; ATN(3 - 3); \" \"; ATN2(0 * -1, -1) > 3\n";
+    assert_eq!(
+        out(source),
+        "1\n1\n1\n1\n1\n1\n1\n1\n1\n0 0 0 0\n1\n1\n1.570795 1.557408\n0 0 1\n"
+    );
+}
+
+#[test]
+fn trigonometric_builtin_names_remain_usable_as_variables() {
+    let source = "PI = 3\nTAN = 4\nATN = 5\nATN2 = 6\n\
+                  PRINT PI + TAN + ATN + ATN2; \" \"; PI(); \" \"; ATN(0)\n\
+                  FUNCTION TAN(PARAMETER X)\n\
+                  TAN = X * 100\n\
+                  FEND\n\
+                  PRINT TAN(2)\n";
+    assert_eq!(out(source), "18 3.141592653589793 0\n200\n");
+}
+
+#[test]
+fn trigonometric_builtins_check_arity_and_types() {
+    assert_fails("PRINT PI(1)", "built-in PI requires 0 arguments, got 1");
+    assert_fails("PRINT PI", "PI");
+    assert_fails("PRINT ATN()", "built-in ATN requires 1 arguments, got 0");
+    assert_fails(
+        "PRINT ATN(1, 2)",
+        "built-in ATN requires 1 arguments, got 2",
+    );
+    assert_fails("PRINT TAN()", "built-in TAN requires 1 arguments, got 0");
+    assert_fails(
+        "PRINT TAN(1, 2)",
+        "built-in TAN requires 1 arguments, got 2",
+    );
+    assert_fails("PRINT ATN2(1)", "built-in ATN2 requires 2 arguments, got 1");
+    assert_fails(
+        "PRINT ATN2(1, 2, 3)",
+        "built-in ATN2 requires 2 arguments, got 3",
+    );
+    assert_fails("PRINT ATN(\"x\")", "ATN");
+    assert_fails("PRINT TAN(\"x\")", "TAN");
+    assert_fails("PRINT ATN2(1, \"x\")", "ATN2");
+}
+
+#[test]
 fn rnd_is_seedable_deterministic_and_in_range() {
     let source = "FUNCTION DRAW(PARAMETER SEED)\n\
                   RANDOMIZE SEED\n\
