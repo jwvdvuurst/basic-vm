@@ -14,6 +14,7 @@ use crate::{
 mod assertions;
 mod builtins;
 mod media;
+mod sound;
 mod testing;
 
 use testing::TestState;
@@ -150,6 +151,7 @@ pub struct Vm {
     test: TestState,
     arguments: Vec<String>,
     media: media::Media,
+    sound: sound::Sound,
 }
 
 impl Vm {
@@ -172,6 +174,7 @@ impl Vm {
             test: TestState::default(),
             arguments: Vec::new(),
             media: media::Media::default(),
+            sound: sound::Sound::default(),
         })
     }
 
@@ -1386,6 +1389,8 @@ impl Vm {
             } => {
                 let result = if builtin.is_media() {
                     self.media_builtin(builtin, arguments, output)?
+                } else if builtin.is_sound() {
+                    self.sound_builtin(builtin, arguments, output)?
                 } else {
                     self.builtin(builtin, arguments)?
                 };

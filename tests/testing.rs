@@ -1248,9 +1248,13 @@ fn cli_misuse_of_the_test_mode_exits_with_two() {
     let path = write(&dir, "t.bas", "TEST A\nEND TEST\n");
     let shown = path.display().to_string();
     let image = dir.text("x.png");
+    let sound = dir.text("x.wav");
     let cases: Vec<Vec<&str>> = vec![
         vec!["--test", "--dump-bytecode", &shown],
         vec!["--test", "--headless-graphics", &shown],
+        vec!["--test", "--headless-audio", &shown],
+        vec!["--test", "--save-audio", &sound, &shown],
+        vec!["--save-audio", &sound, "--test", &shown],
         vec!["--test", "--screenshot", &image, &shown],
         vec!["--test", "--auto-close-ms", "5", &shown],
         vec!["--test", "--max-frames", "5", &shown],
@@ -1272,6 +1276,7 @@ fn cli_misuse_of_the_test_mode_exits_with_two() {
     }
     // Nothing was run or written.
     assert!(!dir.file("x.png").exists());
+    assert!(!dir.file("x.wav").exists());
 }
 
 #[test]

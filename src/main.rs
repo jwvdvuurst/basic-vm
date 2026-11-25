@@ -4,9 +4,37 @@ use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use basic_vm::{
-    AutoClose, ConsoleKeys, GraphicsBackend, HeadlessBackend, ImageFormat, TestOptions, Vm,
-    compile_from, enable_terminal_sequences, run_tests_with,
+    AudioBackend, AutoClose, ConsoleKeys, DeferredAudio, GraphicsBackend, HeadlessAudio,
+    HeadlessBackend, ImageFormat, NullAudio, TestOptions, Vm, compile_from,
+    enable_terminal_sequences, run_tests_with,
 };
+
+/// Opens the real audio output (see [`device_audio`]).
+#[cfg(feature = "audio")]
+fn open_device() -> Result<Box<dyn AudioBackend>, String> {
+    basic_vm::DeviceAudio::open().map(|device| Box::new(device) as Box<dyn AudioBackend>)
+}
+
+#[cfg(not(feature = "audio"))]
+fn open_device() -> Result<Box<dyn AudioBackend>, String> {
+    Err(
+        "this build has no audio support (rebuilt without the `audio` feature); \
+         use --headless-audio or --save-audio"
+            .to_string(),
+    )
+}
+
+/// The default audio backend: the device is opened when the program first
+/// makes a sound. If that fails, ONE warning goes to stderr and sound carries
+/// on silently on a virtual clock (the exit status is unaffected).
+fn device_audio() -> DeferredAudio {
+    DeferredAudio::new(
+        Box::new(open_device),
+        Box::new(|reason| {
+            eprintln!("basic-vm: warning: no audio output available ({reason}); sound is silent");
+        }),
+    )
+}
 
 /// Stands in for the window backend in builds without the `window` feature.
 #[cfg(not(feature = "window"))]
@@ -74,11 +102,13 @@ fn usage_error(message: &str) -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let usage = "usage: basic-vm [--dump-bytecode] [--headless-graphics] [--auto-close-ms <n>] [--max-frames <n>] [--screenshot <file.ppm|file.bmp|file.png>] <program.bas> [program arguments...]\n       basic-vm --test [--test-filter <text>] [--test-imports] <program.bas>";
+    let usage = "usage: basic-vm [--dump-bytecode] [--headless-graphics] [--auto-close-ms <n>] [--max-frames <n>] [--screenshot <file.ppm|file.bmp|file.png>] [--headless-audio] [--save-audio <file.wav>] <program.bas> [program arguments...]\n       basic-vm --test [--test-filter <text>] [--test-imports] <program.bas>";
     let mut args = env::args_os().skip(1).peekable();
     let mut dump = false;
     let mut headless = false;
     let mut screenshot: Option<std::path::PathBuf> = None;
+    let mut headless_audio = false;
+    let mut save_audio: Option<std::path::PathBuf> = None;
     let mut auto_close_ms: Option<u64> = None;
     let mut max_frames: Option<u64> = None;
     let mut test_mode = false;
@@ -90,6 +120,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             dump = true;
         } else if flag == "--headless-graphics" {
             headless = true;
+        } else if flag == "--headless-audio" {
+            headless_audio = true;
+        } else if flag == "--save-audio" {
+            args.next();
+            let file = args
+                .peek()
+                .ok_or("expected a .wav file name after --save-audio")?;
+            save_audio = Some(file.into());
+            headless_audio = true;
         } else if flag == "--test" || flag == "--run-tests" {
             test_mode = true;
         } else if flag == "--test-imports" {
@@ -123,10 +162,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             || screenshot.is_some()
             || auto_close_ms.is_some()
             || max_frames.is_some()
-            || headless;
+            || headless
+            || headless_audio;
         if conflicting {
             return Ok(usage_error(
-                "--test cannot be combined with --dump-bytecode, --screenshot, --auto-close-ms, --max-frames or --headless-graphics (tests always use the headless backend)",
+                "--test cannot be combined with --dump-bytecode, --screenshot, --auto-close-ms, --max-frames, --headless-graphics, --headless-audio or --save-audio (tests always use the headless backends)",
             ));
         }
         let Some(path) = args.next() else {
@@ -200,23 +240,73 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         } else {
             vm.set_graphics_backend(inner);
         }
+        // Sound: recorded (--save-audio), silent on a virtual clock
+        // (--headless-audio) or the real device, opened on the first sound.
+        let recorder = HeadlessAudio::new();
+        if save_audio.is_some() {
+            vm.set_audio_backend(Box::new(recorder.clone()));
+        } else if headless_audio {
+            vm.set_audio_backend(Box::new(NullAudio::new()));
+        } else {
+            vm.set_audio_backend(Box::new(device_audio()));
+        }
         let result = vm.run(&mut io::stdin().lock(), &mut io::stdout().lock());
-        let saved = match &screenshot {
-            Some(file) => save_screenshot(file, &backend, &vm),
-            None => Ok(()),
-        };
-        // The runtime error is the primary failure; a screenshot failure must
+        // The end of a normal run waits for queued sound so a final PLAY is
+        // heard; a closed window, an automatic end, headless graphics or a
+        // failed run just cuts the sound. Recorded audio is never stopped:
+        // what is still queued belongs in the file.
+        if save_audio.is_none() {
+            let wait = !headless_audio
+                && result.is_ok()
+                && !vm.graphics_closed()
+                && !headless
+                && auto_close_ms.is_none()
+                && max_frames.is_none();
+            vm.finish_audio(wait);
+        }
+        let mut failures = Vec::new();
+        if let Some(file) = &screenshot
+            && let Err(shot) = save_screenshot(file, &backend, &vm)
+        {
+            failures.push(shot);
+        }
+        if let Some(file) = &save_audio
+            && let Err(audio) = write_audio_file(file, &recorder)
+        {
+            failures.push(audio);
+        }
+        // The runtime error is the primary failure; a failure to save must
         // not mask it, so report both (runtime error first).
-        match (result, saved) {
-            (Err(error), Err(shot)) => {
-                return Err(format!("{error}\nbasic-vm: {shot}").into());
-            }
-            (Err(error), Ok(())) => return Err(error.into()),
-            (Ok(()), Err(shot)) => return Err(shot.into()),
-            (Ok(()), Ok(())) => {}
+        let extra = failures.join("\nbasic-vm: ");
+        match result {
+            Err(error) if extra.is_empty() => return Err(error.into()),
+            Err(error) => return Err(format!("{error}\nbasic-vm: {extra}").into()),
+            Ok(()) if !extra.is_empty() => return Err(extra.into()),
+            Ok(()) => {}
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `--save-audio`: writes everything the program played (see
+/// `HeadlessAudio::rendered_samples`) back to back as a 16-bit mono 44.1 kHz WAV
+/// file, replacing an existing file.
+fn write_audio_file(file: &std::path::Path, recorder: &HeadlessAudio) -> Result<(), String> {
+    use std::io::Write;
+    let fail = |error: &dyn std::fmt::Display| format!("--save-audio {}: {error}", file.display());
+    let handle = fs::File::create(file).map_err(|error| fail(&error))?;
+    let mut writer = io::BufWriter::new(handle);
+    let written = recorder
+        .write_wav(&mut writer)
+        .and_then(|samples| writer.flush().map(|()| samples))
+        .map_err(|error| {
+            drop(fs::remove_file(file));
+            fail(&error)
+        })?;
+    if written == 0 {
+        eprintln!("basic-vm: warning: the program produced no sound; wrote an empty WAV file");
+    }
+    Ok(())
 }
 
 /// `--test`: runs the TEST blocks of the program and prints the report.

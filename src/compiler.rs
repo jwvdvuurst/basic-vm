@@ -2481,7 +2481,21 @@ impl Parser<'_> {
                     _ => (0, &[]),
                 };
                 let mut flag = None;
-                if self.peek().is_some() || builtin.arity().0 > 0 {
+                // WAVE takes a waveform name as a bare keyword (`WAVE SINE`)
+                // or any string expression (`WAVE "sine"`, `WAVE name$`).
+                let bare_waveform = builtin == Builtin::Wave
+                    && self.position + 1 == self.tokens.len()
+                    && matches!(
+                        self.peek(),
+                        Some(Token::Word(word))
+                            if matches!(word.as_str(), "SQUARE" | "SINE" | "TRIANGLE" | "SAW" | "NOISE")
+                    );
+                if bare_waveform {
+                    if let Some(Token::Word(word)) = self.next() {
+                        self.emit(Op::String(word.to_lowercase()));
+                    }
+                    arguments = 1;
+                } else if self.peek().is_some() || builtin.arity().0 > 0 {
                     loop {
                         if fixed > 0
                             && arguments >= fixed

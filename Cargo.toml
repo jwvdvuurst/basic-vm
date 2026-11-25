@@ -1,13 +1,17 @@
 [package]
 name = "basic-vm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "An extensible BASIC compiler and standalone bytecode virtual machine"
 
 [features]
-default = ["window"]
+default = ["window", "audio"]
 # Desktop window backend for SCREEN (pulls in the minifb crate).
 window = ["dep:minifb"]
+# Real-time sound output for BEEP/SOUND/PLAY/PLAYWAV (pulls in the cpal crate:
+# WASAPI on Windows, CoreAudio on macOS, ALSA on Linux).
+audio = ["dep:cpal"]
 
 [dependencies]
 minifb = { version = "0.29", optional = true }
+cpal = { version = "0.18", optional = true }

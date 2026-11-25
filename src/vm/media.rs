@@ -22,6 +22,8 @@ const MAX_SLEEP_MS: i64 = 3_600_000;
 const MAX_QUEUED_KEYS: usize = 256;
 const MAX_QUEUED_EVENTS: usize = 1024;
 const MAX_CURSOR: i64 = 9999;
+/// Virtual audio time that one `DOEVENTS` accounts for, in milliseconds.
+const DOEVENTS_TICK_MS: u64 = 1;
 
 /// A `DOEVENTS` in progress: the events of this batch not yet delivered.
 /// Delivery is re-entrant: each handler call returns to the same
@@ -89,7 +91,7 @@ impl Media {
     }
 }
 
-fn who_error(who: &str, message: impl std::fmt::Display) -> String {
+pub(super) fn who_error(who: &str, message: impl std::fmt::Display) -> String {
     format!("{who}: {message}")
 }
 
@@ -106,7 +108,7 @@ fn coordinate(value: Value, who: &str, what: &str) -> Result<i64> {
 }
 
 /// A whole number within `low..=high` (numbers truncate toward zero).
-fn ranged(value: Value, who: &str, what: &str, low: i64, high: i64) -> Result<i64> {
+pub(super) fn ranged(value: Value, who: &str, what: &str, low: i64, high: i64) -> Result<i64> {
     // Range-check the original (unclamped) value so errors report what was written.
     let n = match value {
         Value::Int(n) => n,
@@ -202,6 +204,13 @@ impl Vm {
             .map(|screen| &screen.pages[screen.visible])
     }
 
+    /// Whether the user closed the graphics window (it is noticed while the
+    /// program runs and once more when it ends). A host uses it to skip
+    /// end-of-run waiting.
+    pub fn graphics_closed(&self) -> bool {
+        self.media.closed
+    }
+
     /// End-of-run housekeeping: terminal colours are reset when `COLOR` was
     /// used, and a pending frame is presented and the backend closed.
     pub(super) fn finish_media(&mut self, output: &mut impl Write) -> Result<()> {
@@ -211,6 +220,8 @@ impl Vm {
             result = write!(output, "\x1b[0m").map_err(|e| format!("output failed: {e}"));
         }
         if self.media.screen.is_some() {
+            // Notice a window closed during the last stretch of the program.
+            self.pump_events();
             if let Err(message) = self.present_if_dirty() {
                 result = result.and(Err(message));
             }
@@ -388,6 +399,9 @@ impl Vm {
             _ => {
                 self.present_if_dirty()?;
                 self.pump_events();
+                // A polling loop (`DO WHILE SOUNDPLAYING(): DOEVENTS: LOOP`)
+                // must make progress on a virtual audio clock.
+                self.sound.backend.elapse(DOEVENTS_TICK_MS);
                 let queue = std::mem::take(&mut self.media.pending);
                 self.media.dispatch = Some(Dispatch { pc, depth, queue });
             }
@@ -432,6 +446,31 @@ impl Vm {
         self.media.handlers[kind.index()] = function;
     }
 
+    /// Lets `ms` milliseconds pass (`SLEEP`, `SOUNDWAIT`): flushes output,
+    /// presents a dirty screen, then waits. Tests never wait, and neither
+    /// does an `instant` pause; both still advance `TIMER` and the audio
+    /// backend's virtual clock, so the time is accounted for without
+    /// being spent.
+    pub(super) fn pause(&mut self, ms: u64, output: &mut impl Write, instant: bool) -> Result<()> {
+        output.flush().map_err(|e| format!("output failed: {e}"))?;
+        self.present_if_dirty()?;
+        if self.test.no_sleep || instant {
+            self.test.skipped += std::time::Duration::from_millis(ms);
+            if self.media.screen.is_some() {
+                self.pump_events();
+            }
+        } else if self.media.screen.is_some() {
+            if let Some(backend) = self.media.backend.as_mut() {
+                backend.sleep(ms);
+            }
+            self.pump_events();
+        } else {
+            self.media.keys.sleep(ms);
+        }
+        self.sound.backend.elapse(ms);
+        Ok(())
+    }
+
     pub(super) fn media_builtin(
         &mut self,
         builtin: Builtin,
@@ -469,22 +508,7 @@ impl Vm {
             }
             Builtin::Sleep => {
                 let ms = ranged(args[0], who, "milliseconds", 0, MAX_SLEEP_MS)? as u64;
-                output.flush().map_err(fail)?;
-                self.present_if_dirty()?;
-                if self.test.no_sleep {
-                    // Tests never wait; TIMER still sees the time pass.
-                    self.test.skipped += std::time::Duration::from_millis(ms);
-                    if self.media.screen.is_some() {
-                        self.pump_events();
-                    }
-                } else if self.media.screen.is_some() {
-                    if let Some(backend) = self.media.backend.as_mut() {
-                        backend.sleep(ms);
-                    }
-                    self.pump_events();
-                } else {
-                    self.media.keys.sleep(ms);
-                }
+                self.pause(ms, output, false)?;
                 return Ok(None);
             }
             Builtin::Inkey | Builtin::GetKey => {

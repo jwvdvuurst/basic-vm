@@ -3,17 +3,21 @@
 A personal implementation of extended BASIC, compiled to bytecode and executed
 by a standalone Rust virtual machine (not the JVM).
 
-Version 0.4.0 covers seven feature areas: (1) core BASIC with collections,
+Version 0.5.0 covers seven feature areas: (1) core BASIC with collections,
 loops, functions, typed values, a standard library and a tracing garbage
 collector; (2) file I/O and structured errors; (3) records; (4) objects
 (`CLASS`); (5) modules, named/optional parameters; (6) console control,
 software-rendered graphics and events, with a desktop window backend; (7)
-built-in unit testing (`TEST` blocks, `ASSERT*` statements, `basic-vm --test`).
+built-in unit testing (`TEST` blocks, `ASSERT*` statements, `basic-vm --test`);
+plus sound: `BEEP`, `SOUND`, `PLAY` music strings, `WAVE`, `VOLUME`, WAV file
+playback (`PLAYWAV`, `WAVLENGTH`) and real audio output through the sound
+device, with `--save-audio` to render to a WAV file (see [Sound](#sound)).
 
 Examples: `control`, `stdlib`, `fileio`, `types`, `records`, `modules`,
 `objects`, `complex` (a `Complex` class library in `examples/lib/complexutil.bas`,
 with its own unit tests), `testing` (unit tests),
-`graphics`, `paint` and `animation` (double-buffered animation) (plus `collections`, `functions`, `hello`,
+`graphics`, `paint` and `animation` (double-buffered animation), `sound` and
+`wavdemo` (plus `collections`, `functions`, `hello`,
 `input`, `primes`) in `examples/`, and the five text games in `examples/games/`
 (see [Games](#games)).
 
@@ -94,6 +98,36 @@ and `INSIDE(x, y)` (is the pixel on the screen?).
 cargo run -- --auto-close-ms 800 examples\paint.bas
 cargo run -- --auto-close-ms 2000 examples\animation.bas
 ```
+
+### Sound
+
+`BEEP`, `SOUND freq, ms [, volume]`, `PLAY mml$`, `WAVE`, `VOLUME`, `STOPSOUND`,
+`SOUNDWAIT`, `PLAYWAV file$` and the functions `SOUNDPLAYING()`, `SOUNDQUEUE()`,
+`NOTEFREQ()`, `MUSICLENGTH()` and `WAVLENGTH()` are documented in the
+[Sound](docs/statements.md#sound) section.
+Sounds are rendered by a deterministic 44.1 kHz mono software synthesizer
+(`src/audio.rs`; WAV files are decoded by `src/wav.rs`) and queued on an
+`AudioBackend`. The command line plays them through the sound device (the
+default `audio` Cargo feature, built on [cpal](https://crates.io/crates/cpal):
+WASAPI, CoreAudio or ALSA) and waits for the last queued sound to finish before
+exiting. Without a device it prints one warning line and carries on silently. The
+library default is a silent virtual-clock backend (`NullAudio`), and tests use
+`HeadlessAudio`, which records the exact PCM. CLI flags, before the program path:
+
+- `--headless-audio`: do not open the device (virtual clock, nothing is heard,
+  nothing waits).
+- `--save-audio out.wav`: implies `--headless-audio` and writes everything the
+  program played to a 16-bit mono 44.1 kHz WAV file.
+
+```powershell
+cargo run -- --save-audio out.wav examples\sound.bas   # render silently to a file
+cargo run -- examples\wavdemo.bas out.wav              # play it back (VOLUME 30)
+cargo run -- examples\sound.bas                        # play it through the speakers
+```
+
+On Linux the `audio` feature needs the ALSA development headers
+(`libasound2-dev`); `cargo build --no-default-features` builds without sound
+output and window support.
 
 ### Implemented language
 
@@ -230,6 +264,16 @@ errors or `no tests found`, `2` for command-line misuse (for example combining
 
 ### Games
 
+`examples/maze.bas` is a graphical maze-chase game with synthesized sound
+effects. Collect every dot while avoiding the pursuer. Use the arrow keys or
+WASD to steer, R to restart after a win or loss, and Esc to quit.
+
+```powershell
+cargo run -- examples\maze.bas
+cargo run -- --test examples\maze.bas
+cargo run -- --headless-graphics --headless-audio --max-frames 20 examples\maze.bas
+```
+
 Five complete text games live in `examples/games/`. They are independent,
 clean-room implementations of well-known public game concepts (the rules are
 common knowledge; no original listing was used - each file header credits the
@@ -294,8 +338,9 @@ collection count. Occupied bytes can include garbage until the next collection.
 
 ## Development
 
-The only third-party dependency is `minifb`, used by the optional `window`
-feature (enabled by default); `cargo build --no-default-features` has none.
+The only third-party dependencies are optional, both enabled by default:
+`minifb` for the `window` feature and `cpal` for the `audio` feature (sound
+device output); `cargo build --no-default-features` has none.
 
 ```powershell
 cargo fmt --check

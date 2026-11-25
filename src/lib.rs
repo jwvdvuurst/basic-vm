@@ -1,3 +1,6 @@
+mod audio;
+#[cfg(feature = "audio")]
+mod audio_device;
 mod bytecode;
 mod compiler;
 mod console;
@@ -9,9 +12,20 @@ mod stdlib;
 mod testing;
 mod value;
 mod vm;
+mod wav;
 #[cfg(feature = "window")]
 mod window;
 
+pub use audio::{
+    AMPLITUDE_PER_VOLUME, AudioBackend, AudioEvent, AudioFailureHandler, AudioOpener,
+    BEEP_DURATION_MS, BEEP_FREQUENCY_HZ, DEFAULT_VOLUME, DeferredAudio, ENVELOPE_MS,
+    ENVELOPE_SAMPLES, HeadlessAudio, MAX_FREQUENCY_HZ, MAX_QUEUE_MS, MAX_QUEUE_SAMPLES,
+    MAX_TONE_MS, MAX_VOLUME, MIN_FREQUENCY_HZ, MmlError, NullAudio, SAMPLE_RATE, Tone, Waveform,
+    mix_into, mml_length_samples, ms_to_samples, note_frequency, parse_mml, render,
+    samples_to_ms_ceil, samples_to_ms_round, wav_bytes, write_wav,
+};
+#[cfg(feature = "audio")]
+pub use audio_device::DeviceAudio;
 pub use bytecode::{
     BinaryOp, Builtin, CallBinding, CollectionKind, EventKind, FieldDefault, Instruction, Op,
     Place, Program, RecordField, RecordType, RefArg, TestCase, VarType,
@@ -27,6 +41,9 @@ pub use testing::{
     MAX_CAPTURED_OUTPUT, TestOptions, TestReport, TestResult, TestStatus, run_tests, run_tests_with,
 };
 pub use vm::{MAX_CALL_DEPTH, Vm};
+pub use wav::{
+    MAX_WAV_CHANNELS, MAX_WAV_FILE_BYTES, WavError, WavInfo, decode_wav_samples, wav_info,
+};
 #[cfg(feature = "window")]
 pub use window::WindowBackend;
 

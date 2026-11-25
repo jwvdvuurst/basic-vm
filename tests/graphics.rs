@@ -2,7 +2,9 @@
 
 use std::io::Cursor;
 
-use basic_vm::{Event, HeadlessBackend, ScriptedKeys, Vm, compile};
+use basic_vm::{
+    AudioEvent, AutoClose, Event, HeadlessAudio, HeadlessBackend, ScriptedKeys, Vm, compile,
+};
 
 const WHITE: u32 = 0xFFFFFF;
 
@@ -430,6 +432,36 @@ fn sleep_in_graphics_mode_uses_backend_and_presents() {
     let r = ok("SCREEN 4, 4\nPSET 0, 0\nSLEEP 40");
     assert_eq!(r.backend.slept_ms(), 40);
     assert!(r.backend.frames() >= 1);
+}
+
+#[test]
+fn maze_game_moves_draws_and_plays_collection_sound() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("maze.bas");
+    let source = std::fs::read_to_string(path).unwrap();
+    let program = compile(&source).unwrap();
+    let mut vm = Vm::new(program).unwrap();
+    let graphics = HeadlessBackend::new();
+    graphics.push_event(Event::KeyDown("RIGHT".into()));
+    vm.set_graphics_backend(Box::new(AutoClose::new(graphics.clone(), None, Some(40))));
+    let audio = HeadlessAudio::new();
+    vm.set_audio_backend(Box::new(audio.clone()));
+    vm.run(&mut Cursor::new(""), &mut Vec::new()).unwrap();
+
+    let frame = graphics.last_frame().unwrap();
+    assert_eq!(frame.pixel(30, 62), Some(0));
+    assert!(
+        (50..=230).any(|x| frame.pixel(x, 62) == Some(0xFFFF55)),
+        "player should be drawn further along the corridor"
+    );
+    assert!(
+        audio
+            .events()
+            .iter()
+            .any(|event| matches!(event, AudioEvent::Tone(tone) if tone.frequency_hz == 700.0)),
+        "collecting a dot should play a tone"
+    );
 }
 
 #[test]

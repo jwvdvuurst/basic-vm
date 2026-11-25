@@ -399,9 +399,42 @@ builtins! {
     Buffers => "BUFFERS", 0, 0;
     Screenshot => "SCREENSHOT", 1, 1;
     ScreenshotVisible => "SCREENSHOT VISIBLE", 1, 1;
+    Beep => "BEEP", 0, 0;
+    Sound => "SOUND", 2, 3;
+    Play => "PLAY", 1, 1;
+    Wave => "WAVE", 1, 1;
+    Volume => "VOLUME", 1, 1;
+    StopSound => "STOPSOUND", 0, 0;
+    SoundWait => "SOUNDWAIT", 0, 0;
+    SoundPlaying => "SOUNDPLAYING", 0, 0;
+    SoundQueue => "SOUNDQUEUE", 0, 0;
+    NoteFreq => "NOTEFREQ", 1, 1;
+    MusicLength => "MUSICLENGTH", 1, 1;
+    PlayWav => "PLAYWAV", 1, 1;
+    WavLength => "WAVLENGTH", 1, 1;
 }
 
 impl Builtin {
+    /// Sound routines, executed by the VM's audio layer.
+    pub(crate) fn is_sound(self) -> bool {
+        use Builtin::*;
+        matches!(
+            self,
+            Beep | Sound
+                | Play
+                | Wave
+                | Volume
+                | StopSound
+                | SoundWait
+                | SoundPlaying
+                | SoundQueue
+                | NoteFreq
+                | MusicLength
+                | PlayWav
+                | WavLength
+        )
+    }
+
     /// Console and graphics routines, executed by the VM's media layer.
     pub(crate) fn is_media(self) -> bool {
         use Builtin::*;
@@ -491,6 +524,14 @@ impl Builtin {
                 | Self::Seek
                 | Self::Kill
                 | Self::SetField
+                | Self::Beep
+                | Self::Sound
+                | Self::Play
+                | Self::Wave
+                | Self::Volume
+                | Self::StopSound
+                | Self::SoundWait
+                | Self::PlayWav
         )
     }
 

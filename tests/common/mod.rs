@@ -38,6 +38,62 @@ pub fn examples(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Decodes a 16-bit mono PCM WAV file written by the crate, checking every
+/// header field independently of the encoder. Returns `(sample_rate, samples)`.
+pub fn decode_wav(data: &[u8]) -> (u32, Vec<i16>) {
+    let u16_at = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
+    let u32_at =
+        |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    assert_eq!(&data[0..4], b"RIFF");
+    assert_eq!(u32_at(4) as usize, data.len() - 8, "RIFF size");
+    assert_eq!(&data[8..16], b"WAVEfmt ");
+    assert_eq!(u32_at(16), 16, "fmt chunk size");
+    assert_eq!(u16_at(20), 1, "PCM");
+    assert_eq!(u16_at(22), 1, "mono");
+    let rate = u32_at(24);
+    assert_eq!(u32_at(28), rate * 2, "byte rate");
+    assert_eq!(u16_at(32), 2, "block align");
+    assert_eq!(u16_at(34), 16, "bits per sample");
+    assert_eq!(&data[36..40], b"data");
+    let length = u32_at(40) as usize;
+    assert_eq!(data.len(), 44 + length, "data size");
+    let samples = (0..length / 2)
+        .map(|index| u16_at(44 + 2 * index) as i16)
+        .collect();
+    (rate, samples)
+}
+
+/// A PCM WAV file with an arbitrary format (hand-built headers, independent of
+/// the crate's own writer); `data` is the raw, already interleaved sample bytes.
+pub fn pcm_wav(channels: u16, rate: u32, bits: u16, data: &[u8]) -> Vec<u8> {
+    let block = channels * bits / 8;
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
+    out.extend_from_slice(&block.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// A sine of `hz` Hz lasting `ms` milliseconds at `rate` Hz, as 16-bit
+/// samples with the given peak.
+pub fn sine_samples(hz: f64, ms: u32, rate: u32, peak: f64) -> Vec<i16> {
+    let count = u64::from(rate) * u64::from(ms) / 1000;
+    (0..count)
+        .map(|i| {
+            (peak * (std::f64::consts::TAU * hz * i as f64 / f64::from(rate)).sin()).round() as i16
+        })
+        .collect()
+}
+
 /// A decoded image: `pixels[y * width + x]` is `0xRRGGBB`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Image {
